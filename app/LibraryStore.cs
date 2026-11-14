@@ -48,13 +48,8 @@ namespace WallpaperManager
                                 it.Effect = 0;
                                 it.Motion = false;
                             }
-                            // 标着动态但 videos\<id>.mp4 已经不在了（被删/还没生成）：
-                            // 也算静态。否则菜单会写「当前：云端飘动视频」，桌面却是一块不动的图。
-                            if (it.Motion && !File.Exists(Path.Combine(root, "videos", it.Id + ".mp4")))
-                            {
-                                it.Motion = false;
-                                it.Effect = 0;
-                            }
+                            // 「标着动态但根本没片子可播」的降级放到下面路径字段赋值之后做，
+                            // 因为要跟运行时一样走 RelatedVideo 的七层发现（含按画面认散片）。
                             // 按文件后缀判断动态/静态：早先一律当视频，导致专栏图集被当成视频设不上壁纸
                             string lowFile = it.File.ToLowerInvariant();
                             it.IsVideo = lowFile.EndsWith(".mp4") || lowFile.EndsWith(".webm")
@@ -66,6 +61,17 @@ namespace WallpaperManager
                             if (!it.IsVideo && (it.ImagePath == null || !File.Exists(it.ImagePath)))
                                 it.ImagePath = ExistingCover(root, it.Id);
                             if (!it.IsVideo && it.ThumbAbs.Length == 0) it.ThumbAbs = it.ImagePath;
+
+                            // 11-15：只有「真的一片都找不到」才降级为静态，否则菜单会写
+                            // 「当前：云端飘动视频」而桌面不动。旧版只认 videos\<id>.mp4，
+                            // 把靠画面判定认领散片的图（biliart-17714251-4）误清成静态，
+                            // 导致点卡片切换壁纸时不自动播放已有动态视频。
+                            // CanPlay 是纯只读判定：不复制、不改名、不写壁纸库。
+                            if (it.Motion && !RelatedVideo.CanPlay(root, it, it.ImagePath))
+                            {
+                                it.Motion = false;
+                                it.Effect = 0;
+                            }
                             list.Add(it);
                         }
                     }

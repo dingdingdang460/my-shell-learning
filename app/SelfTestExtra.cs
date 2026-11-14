@@ -1554,5 +1554,135 @@ namespace WallpaperManager
 
             return Finish(sb, pass, total);
         }
+
+        /// <summary>
+        /// 11-15：主人「库里倒数第二张图切换壁纸时不会自动播放已有动态视频」。
+        /// 根因是 LibraryStore.Load 只认 videos\&lt;id&gt;.mp4，把靠画面判定认领散片的
+        /// biliart-17714251-4 一载入就清成 Motion=false，点卡片只设静态壁纸，
+        /// 而角标用 VideoFor 仍查得到片 —— 显示「有飘动」却永远不自动播。
+        /// 隔离库里复现三种现场：变体命名片、按画面认领的散片、确实无片；
+        /// 最后只读核对真实库倒数第二张。全隔离：临时库在仓库内 .selftest-tmp，
+        /// 不设系统壁纸、不起播放器、不写 D:\Wallpaper / %APPDATA%。
+        /// </summary>
+        public static string SwitchMotion(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+
+            string savedLib = app.Config.LibRoot;
+            string savedDir = ConfigStore.DirOverride;
+            string tmp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".selftest-tmp", "switchmotion");
+            string lib = Path.Combine(tmp, "lib");
+            string cfg = Path.Combine(tmp, "cfg");
+
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(lib, "videos"));
+                Directory.CreateDirectory(Path.Combine(lib, "images"));
+                Directory.CreateDirectory(cfg);
+                ConfigStore.DirOverride = cfg;
+                app.Config.LibRoot = lib;
+                RelatedVideo.Invalidate();
+
+                // 真实库的图和散片只读取样，复制进隔离库当比对基准，不改原件。
+                string realPic = Path.Combine(savedLib, "images", "biliart-17714251-4.jpg");
+                string realVid = Path.Combine(savedLib, "videos", "Anime_illustration_of_a_girl_w_2026-11-12T10-02-47.mp4");
+                string otherPic = Path.Combine(savedLib, "images", "biliart-17403571-4.jpg");
+                bool mats = File.Exists(realPic) && File.Exists(realVid) && File.Exists(otherPic);
+                Hit(sb, ref pass, ref total, "真实库里取得到复现材料（只读）", mats,
+                    Path.GetFileName(realPic) + " / " + Path.GetFileName(realVid));
+                if (!mats) return Finish(sb, pass, total);
+
+                File.Copy(otherPic, Path.Combine(lib, "images", "sm-variant-01.jpg"), true);
+                File.Copy(realPic, Path.Combine(lib, "images", "sm-content-01.jpg"), true);
+                File.Copy(otherPic, Path.Combine(lib, "images", "sm-none-01.jpg"), true);
+                File.Copy(realVid, Path.Combine(lib, "videos", "sm-variant-01.raw.mp4"), true);
+                File.Copy(realVid, Path.Combine(lib, "videos", "orphan-clip-77.mp4"), true);
+
+                string idx = "["
+                    + "{\"id\":\"sm-variant-01\",\"title\":\"变体命名片\",\"tag\":\"other\",\"file\":\"images/sm-variant-01.jpg\",\"motion\":true,\"fx\":2},"
+                    + "{\"id\":\"sm-content-01\",\"title\":\"画面认领散片\",\"tag\":\"other\",\"file\":\"images/sm-content-01.jpg\",\"motion\":true,\"fx\":2},"
+                    + "{\"id\":\"sm-none-01\",\"title\":\"确实无片\",\"tag\":\"other\",\"file\":\"images/sm-none-01.jpg\",\"motion\":true,\"fx\":2}"
+                    + "]";
+                File.WriteAllText(Path.Combine(lib, "index.json"), idx, Encoding.UTF8);
+
+                List<WallpaperItem> loaded = LibraryStore.Load(lib);
+                Hit(sb, ref pass, ref total, "索引三条都载入了", loaded.Count == 3, loaded.Count + " 条");
+
+                WallpaperItem a = ItemById(loaded, "sm-variant-01");
+                WallpaperItem b = ItemById(loaded, "sm-content-01");
+                WallpaperItem c = ItemById(loaded, "sm-none-01");
+                Hit(sb, ref pass, ref total, "三条 id 都在", a != null && b != null && c != null, "");
+                if (a == null || b == null || c == null) return Finish(sb, pass, total);
+
+                Hit(sb, ref pass, ref total, "变体命名片：载入后动效标记没被误清",
+                    a.Motion && a.Effect == 2, "Motion=" + a.Motion + " fx=" + a.Effect);
+                Hit(sb, ref pass, ref total, "画面认领散片：载入后动效标记没被误清",
+                    b.Motion && b.Effect == 2, "Motion=" + b.Motion + " fx=" + b.Effect);
+                Hit(sb, ref pass, ref total, "确实无片：仍然降级为静态（语义没放宽）",
+                    !c.Motion && c.Effect == 0, "Motion=" + c.Motion + " fx=" + c.Effect);
+
+                Hit(sb, ref pass, ref total, "索引载入是纯只读，没有往库里复制片子",
+                    !File.Exists(Path.Combine(lib, "videos", "sm-variant-01.mp4"))
+                    && !File.Exists(Path.Combine(lib, "videos", "sm-content-01.mp4")), "");
+
+                Hit(sb, ref pass, ref total, "切换分支判定：变体命名片会走自动开播",
+                    app.MotionCapable(a), "");
+                Hit(sb, ref pass, ref total, "切换分支判定：画面认领散片会走自动开播",
+                    app.MotionCapable(b), "");
+                Hit(sb, ref pass, ref total, "切换分支判定：确实无片不会假开播",
+                    !app.MotionCapable(c), "");
+                Hit(sb, ref pass, ref total, "界面角标判定也认这两张有片",
+                    app.HasCloudVideo(a) && app.HasCloudVideo(b) && !app.HasCloudVideo(c), "");
+
+                string pa = RelatedVideo.Find(lib, a, a.ImagePath);
+                string pb = RelatedVideo.Find(lib, b, b.ImagePath);
+                Hit(sb, ref pass, ref total, "变体命名片确实能解析出可播文件",
+                    !string.IsNullOrEmpty(pa) && File.Exists(pa), pa);
+                Hit(sb, ref pass, ref total, "散片按画面判定认领、指向原文件（不改名不串片）",
+                    !string.IsNullOrEmpty(pb) && File.Exists(pb)
+                    && string.Equals(Path.GetFileName(pb), "orphan-clip-77.mp4",
+                                     StringComparison.OrdinalIgnoreCase), pb);
+
+                // ---- 真实库现场：只读核对主人报的「倒数第二张」 ----
+                app.Config.LibRoot = savedLib;
+                RelatedVideo.Invalidate();
+                List<WallpaperItem> real = LibraryStore.Load(savedLib);
+                int at = -1;
+                for (int i = 0; i < real.Count; i++)
+                    if (real[i].Id == "biliart-17714251-4") { at = i; break; }
+                WallpaperItem target = at >= 0 ? real[at] : null;
+                Hit(sb, ref pass, ref total, "真实库里倒数第二张正是 biliart-17714251-4",
+                    at == real.Count - 2, "下标 " + at + " / 共 " + real.Count);
+                Hit(sb, ref pass, ref total, "这张载入后保留动效标记",
+                    target != null && target.Motion && target.Effect == 2,
+                    target == null ? "未找到" : "Motion=" + target.Motion + " fx=" + target.Effect);
+                Hit(sb, ref pass, ref total, "这张切换壁纸时会走自动开播",
+                    target != null && app.MotionCapable(target), "");
+                Hit(sb, ref pass, ref total, "片源是内容判定散片，真实库没被写新文件",
+                    target != null
+                    && !File.Exists(Path.Combine(savedLib, "videos", "biliart-17714251-4.mp4")), "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "切换自动开播自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                app.Config.LibRoot = savedLib;
+                ConfigStore.DirOverride = savedDir;
+                RelatedVideo.Invalidate();
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+            return Finish(sb, pass, total);
+        }
+
+        static WallpaperItem ItemById(List<WallpaperItem> list, string id)
+        {
+            for (int i = 0; i < list.Count; i++)
+                if (string.Equals(list[i].Id, id, StringComparison.OrdinalIgnoreCase)) return list[i];
+            return null;
+        }
     }
 }

@@ -1418,3 +1418,70 @@ docs/PROGRESS.md              本文件
   内容比对仍「20 张图 × 3 段未归属视频 → 认领 3 对」且只确认
   `biliart-17714251-4` 那一对 —— 新片按规范主文件名直接命中，
   **没有把别的壁纸视频串到新图上**。程序可直接点开播放。
+
+## 二十、11-15：切换壁纸不自动播已有动态视频（v0.9.3）
+
+### 1. 现象与根因
+
+主人报「库里倒数第二张图切换壁纸时不会自动播放已有动态视频」。
+现场（只读）：库 20 条，倒数第二张 = `biliart-17714251-4`，
+`index.json` 里 `motion=true / fx=2`，`videos\` 下**没有**它的规范主文件，
+片源是 v0.9 按画面判定认领的散片
+`Anime_illustration_of_a_girl_w_2026-11-12T10-02-47.mp4`（MAD=0.067 / hash=8）。
+运行日志显示切换时走的是 `DoSet` 的「回到静态壁纸，已关掉自动恢复」，
+即 `ApplyItem` 没进 `StartDynamic` 分支。
+
+根因是 `LibraryStore.Load` 里一道 v0.7 之前的旧闸：
+`if (it.Motion && !File.Exists(videos\<id>.mp4)) { it.Motion=false; it.Effect=0; }`
+只认规范主文件，跟运行时 `RelatedVideo` 的七层发现不一致。
+于是载入即把这张清成静态，点卡片只设静态壁纸；而角标用
+`VideoFor → RelatedVideo.Find` 仍能查到散片，显示「✦ 飘动」——
+两套口径打架，正是「有片却不自动播」的体感。
+同类影响：任何靠第 7 层内容判定、或 `.bak*` / 变体命名 / 子目录 / 工单 out
+提供片源的图，重启程序后动效标记都会被误清。
+
+### 2. 改动
+
+- `RelatedVideo.cs`：新增只读 `CanPlay(libRoot, it, imagePath)`，
+  判 `videos\<id>.mp4` 或 `FindSource` 的七层发现（含内容判定），
+  **只找不搬**：不 `File.Copy`、不改名、不写壁纸库；扫描异常时保守保留
+  用户标记（运行时 `VideoFor` 还会再判一次，没片不会播）。
+- `LibraryStore.cs`：删掉只认规范主文件的降级判断，移到
+  `ThumbAbs` / `ImagePath` 等路径字段赋值之后，改用
+  `RelatedVideo.CanPlay(root, it, it.ImagePath)`；「真的一片都没有」仍降级为静态。
+- `Program.cs`：`ApplyItem` 的两个动态分支收口到 `MotionCapable(it)`，
+  与载入、角标、菜单、自检共用同一条判定；新增 `SelfTestArgs()`，
+  `RestoreDynamic` / `WatchdogTick` / `RestartPlayer` 在 `--*test` / `--probe*`
+  下跳过自动恢复，自检进程不再继承真实配置里的「上次动态壁纸」。
+- `SelfTestExtra.cs`：新增 `SwitchMotion` 自检（`--switchmotiontest`），
+  在仓库内 `.selftest-tmp` 造三种现场：变体命名片、按画面认领的散片、
+  确实无片；最后只读核对真实库倒数第二张。
+
+### 3. 验证（全绿）
+
+- `build.bat --noboot` 两次，`build.log` / `build-player.log` 均 0 字节。
+- 新增 `--switchmotiontest 17/17 PASS`：三种现场的动效标记、
+  「索引载入纯只读不复制片子」、切换分支与角标判定一致、
+  散片按画面认领且指向原文件；真实库 `下标 18 / 共 20` 确认倒数第二张，
+  载入后 `Motion=True fx=2`、切换会走自动开播、真实库未被写新文件。
+- 回归中 `--launchtest` 曾 10/11：每个自检进程启动都会 `RestoreDynamic`
+  拉起播放器并残留给下一项，是自检污染而非播放器故障；加上 `SelfTestArgs()`
+  隔离闸后 `--launchtest 11/11`，全量 **12 项全 PASS**：
+  `--switchmotiontest 17/17`、`--searchtest`（视频 16/16 静态 4/4 飘动片 4/4）、
+  `--importexporttest 11/11`、`--proxytest 9/9`、`--videotest 7/7`、
+  `--relatedvideotest 56/56`、`--orphantest 16/16`、
+  `--clouddialogtest 20/20`、`--contenttest 5/5`、`--badgetest 28/28`、
+  `--launchtest 11/11`、`--buddyhinttest 43/43`。
+- 本轮把 `TEMP` / `TMP` 指向仓库内 `.selftest-tmp\`，日志与临时文件全部落在
+  工作空间内。外部 `index.json` / `config.json` / `jobs\queue` / `jobs\buddy`
+  快照**差异 0 处**；`D:\Wallpaper` 68 文件 / 282,048,155 字节不变，
+  `videos\biliart-17714251-4.mp4` 仍不存在（片源保持内容判定散片）；
+  跑完无残留进程。
+- 编译脚本按既有流程结束了正在运行的旧实例（否则无法替换 exe）；
+  旧进程跑的是旧代码，修复需重新打开壁纸管家生效。
+
+### 4. 版本与待办
+
+`package.bat` / `docs/readme.txt` 升 **v0.9.3**，重新打包
+`dist\WallpaperManager-v0.9.3.zip`。待办不变：远程 URL、`index.json` 里
+新图误写的动效标记、`jobs\done\` 假工单、真 Key 链路，均按权限边界等主人授权。

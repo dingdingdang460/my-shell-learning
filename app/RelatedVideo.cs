@@ -563,6 +563,34 @@ namespace WallpaperManager
         }
 
         /// <summary>
+        /// 只读判定「这张图标着动态时，到底有没有片子可播」——载入索引用。
+        ///
+        /// 11-15：以前 LibraryStore.Load 只认 videos\&lt;id&gt;.mp4，跟运行时这套
+        /// 七层发现不一致。靠第 7 层画面判定认领散片的图（biliart-17714251-4）
+        /// 一载入就被清成 Motion=false，点卡片只设静态壁纸、动态视频不自动播，
+        /// 可角标用 VideoFor 又查得到片，于是显示「有飘动」却永远不播。
+        /// 这里复用同一套 FindSource 规则，但**只找不搬**：绝不 File.Copy、
+        /// 绝不写壁纸库，索引载入这件事保持纯读。
+        /// </summary>
+        public static bool CanPlay(string libRoot, WallpaperItem it, string imagePath)
+        {
+            if (it == null || it.IsVideo || string.IsNullOrEmpty(it.Id)
+                || string.IsNullOrEmpty(libRoot)) return false;
+            try
+            {
+                if (File.Exists(CloudGen.VideoPath(libRoot, it.Id))) return true;
+                bool inferred;
+                return FindSource(libRoot, it, imagePath, out inferred) != null;
+            }
+            catch
+            {
+                // 载入阶段宁可保留主人写的标记，也别因为一次扫描异常就误清成静态：
+                // 运行时 ApplyItem 还会用 VideoFor 再判一次，真没片不会播。
+                return true;
+            }
+        }
+
+        /// <summary>
         /// 返回可播的规范路径 videos\&lt;id&gt;.mp4；没有任何相关视频时返回 null。
         /// 找到的文件不在规范位置就复制一份过去（原文件保留），并写日志说明来源。
         /// 内容判定命中的散片例外：直接播原文件，不复制、不改名、不往壁纸库写文件。

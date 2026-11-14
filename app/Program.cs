@@ -111,6 +111,26 @@ namespace WallpaperManager
         const int WM_WTSSESSION_CHANGE = 0x02B1;
         const int WTS_SESSION_UNLOCK = 0x8;
 
+        /// <summary>
+        /// 11-15：跑 --*test / --probe* 自检时，不继承真实配置里的「上次动态壁纸」。
+        /// 以前每个自检进程一启动就 RestoreDynamic 拉起播放器：既把自检和用户桌面
+        /// 绑在一起，残留进程还会让下一项 --launchtest 误报「开播前有残留播放器」。
+        /// --dynvideo / --stopdynamic 这类真实入口不受影响。
+        /// </summary>
+        static bool SelfTestArgs()
+        {
+            string[] a = Environment.GetCommandLineArgs();
+            for (int i = 1; i < a.Length; i++)
+            {
+                string s = a[i];
+                if (!s.StartsWith("--", StringComparison.Ordinal)) continue;
+                string t = s.ToLowerInvariant();
+                if (t.EndsWith("test", StringComparison.Ordinal)
+                    || t.StartsWith("--probe", StringComparison.Ordinal)) return true;
+            }
+            return false;
+        }
+
         public void Initialize()
         {
             ResourcesDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "resources");
@@ -182,7 +202,8 @@ namespace WallpaperManager
                     || s.Equals("--contenttest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--badgetest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--launchtest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--buddyhinttest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--buddyhinttest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--switchmotiontest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -784,6 +805,27 @@ namespace WallpaperManager
                     auto.Start();
                     break;
                 }
+                if (string.Equals(s, "--switchmotiontest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-15：载入索引误清动效标记，导致有片的图切换时不自动开播。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.SwitchMotion(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --switchmotiontest：\r\n" + detail);
+                        Log.Note("自检 --switchmotiontest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
                 if (string.Equals(s, "--importexporttest", StringComparison.OrdinalIgnoreCase))
                 {
                     // 11-14：真点「导出配置…/导入配置…」按钮，验整条链路与零污染。
@@ -1272,6 +1314,7 @@ namespace WallpaperManager
             if (win != null) win.RefreshBadges();
             if (Environment.TickCount < watchdogReadyAt) return;
             if (!Config.DynamicEnabled) return;          // 用户主动停了就不复活
+            if (SelfTestArgs()) return;                  // 自检进程不自动复活真实桌面
 
             // 刚启动/刚换台：播放器从 process start 到首帧上屏要 250~400ms，
             // 这段时间进程在、窗口还没挂上。旧代码正好在这一刻判定「掉了」，
@@ -1306,6 +1349,7 @@ namespace WallpaperManager
         /// <summary>按上次播的视频重新拉起播放器。看门狗和"进程退出"回调共用这一处</summary>
         void RestartPlayer()
         {
+            if (SelfTestArgs()) return;
             WallpaperItem target = null;
             for (int i = 0; i < Items.Count; i++)
             {
@@ -1357,6 +1401,7 @@ namespace WallpaperManager
 
         /// <summary>上次退出时如果开着动态壁纸，这次启动接着播</summary>
         void RestoreDynamic()        {
+            if (SelfTestArgs()) return;          // 自检进程不接管用户桌面
             if (!Config.DynamicEnabled || string.IsNullOrEmpty(Config.LastDynamicId)) return;
             for (int i = 0; i < Items.Count; i++)
             {
@@ -3654,15 +3699,15 @@ namespace WallpaperManager
             // 视频项不是「一张图」：直接开动态壁纸。
             // 以前这里不分视频/图片，视频项也走 DoSet（把封面 jpg 设成壁纸），
             // 结果点了视频既没有动态壁纸、桌面还被换成了封面图 ——
-            // 你遇到的「换一张图片之后就没动态背景」就是这条路径。
-            else if (it.IsVideo)
-            {
-                StartDynamic(it);
-                return;
-            }
-            // 静态图被标成「动态播放」且云端视频已经在盘上：交给播放器播那段视频，
+            // 「换一张图片之后就没动态背景」就是这条路径。
+            //
+            // 静态图被标成「动态播放」且片子确实在盘上：交给播放器播那段视频，
             // 不走系统壁纸（系统壁纸天生不会动）。没片子就正常当静态图设下去。
-            else if (it.Motion && VideoFor(it) != null)
+            //
+            // 11-15：判定统一收口到 MotionCapable —— 它和 LibraryStore.Load 里
+            // 保留/降级动效标记用的是同一套 RelatedVideo 发现规则，界面自检也验它，
+            // 不再出现「角标说有片、切过去却只设静态壁纸」的两套口径。
+            else if (MotionCapable(it))
             {
                 StartDynamic(it);
                 return;
