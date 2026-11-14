@@ -1303,5 +1303,241 @@ namespace WallpaperManager
             }
             return Finish(sb, pass, total);
         }
+
+        /// <summary>
+        /// 11-15：主人问「云端生成能不能用 WorkBuddy 里免费的 Hy4 / Hy3」。
+        /// 自检只验口径与副作用：面板说明、代出片指令、右键菜单入口，
+        /// 以及「纯函数确实零下单、零请求、零文件写入」。
+        /// 不写剪贴板、不写工单、不构造设置窗口，全程只读。
+        /// </summary>
+        public static string BuddyHint(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+            string note = CloudGen.BuddyNote;
+            string menu = CloudGen.BuddyMenuLabel;
+            string tip = CloudGen.BuddyMenuTip;
+
+            Hit(sb, ref pass, ref total, "面板说明提到 Hy4 / Hy3",
+                note.IndexOf("Hy4") >= 0 && note.IndexOf("Hy3") >= 0, "");
+            Hit(sb, ref pass, ref total, "说明写明这两个模型生成不了 mp4",
+                note.IndexOf("生成不了 mp4") >= 0, "");
+            Hit(sb, ref pass, ref total, "说明写明 exe 不共享 WorkBuddy 额度 / Key",
+                note.IndexOf("不共享") >= 0 && note.IndexOf("API Key") >= 0, "");
+            Hit(sb, ref pass, ref total, "说明写明限免期限与每日额度",
+                note.IndexOf("2026-11-15 23:59") >= 0 && note.IndexOf("每日有免费额度") >= 0, "");
+            Hit(sb, ref pass, ref total, "说明写明多模态出片消耗积分（不冒充免费）",
+                note.IndexOf("积分") >= 0, "");
+            Hit(sb, ref pass, ref total, "说明不含「免费出片 / 0 元」误导",
+                note.IndexOf("免费出片") < 0 && note.IndexOf("0 元") < 0, "");
+            Hit(sb, ref pass, ref total, "模型目录里绝不混入 hy4 / hy3（选了也调不通）",
+                GenModels.Find("hy4") == null && GenModels.Find("hy3") == null
+                && GenModels.Find("Hy4 preview") == null, "");
+
+            Hit(sb, ref pass, ref total, "菜单入口文案含 WorkBuddy / 不填 Key",
+                menu.IndexOf("WorkBuddy") >= 0 && menu.IndexOf("不填 Key") >= 0, "");
+            Hit(sb, ref pass, ref total, "菜单提示写明会消耗积分",
+                tip.IndexOf("积分") >= 0, "");
+
+            WallpaperItem still = BadgeItem("zz-buddy-hint", "说明测试图");
+            WallpaperItem video = BadgeItem("zz-buddy-video", "视频条目");
+            video.IsVideo = true;
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string lib = Path.Combine(baseDir, ".selftest-tmp", "buddy-lib");
+            string img = Path.Combine(lib, "images", "zz-buddy-hint.jpg");
+            string text = CloudGen.BuildBuddyRequest(still, img, lib, 3);
+            string target = Path.Combine(lib, "videos", still.Id + ".mp4");
+
+            Hit(sb, ref pass, ref total, "指令里有壁纸 id", text.IndexOf(still.Id) >= 0, "");
+            Hit(sb, ref pass, ref total, "指令里有源图绝对路径", text.IndexOf(img) >= 0, "");
+            Hit(sb, ref pass, ref total, "指令里落到 videos\\<id>.mp4", text.IndexOf(target) >= 0, target);
+            Hit(sb, ref pass, ref total, "指令写明 3 秒 / 720P / 无水印",
+                text.IndexOf("3 秒") >= 0 && text.IndexOf("720P") >= 0 && text.IndexOf("无水印") >= 0, "");
+            Hit(sb, ref pass, ref total, "指令复用统一提示词（镜头静止 / 可循环）",
+                text.IndexOf("Camera completely static") >= 0 && text.IndexOf("Seamless loop") >= 0, "");
+            Hit(sb, ref pass, ref total, "指令写明消耗积分、不是对话免费额度",
+                text.IndexOf("积分") >= 0 && text.IndexOf("Hy4 / Hy3") >= 0, "");
+            Hit(sb, ref pass, ref total, "指令要求先报积分并等确认，不自动扣",
+                text.IndexOf("等我确认后再生成") >= 0 && text.IndexOf("不要直接扣") >= 0, "");
+            Hit(sb, ref pass, ref total, "指令写明已有同画面片子就不重出",
+                text.IndexOf("同一画面的片子") >= 0, "");
+            Hit(sb, ref pass, ref total, "秒数超过上限被夹到 3 秒",
+                CloudGen.BuildBuddyRequest(still, img, lib, 99).IndexOf("3 秒") >= 0, "");
+            Hit(sb, ref pass, ref total, "空条目返回空串",
+                CloudGen.BuildBuddyRequest(null, img, lib, 3) == "", "");
+            Hit(sb, ref pass, ref total, "指令里没有服务商地址 / Key（不会去直连）",
+                text.IndexOf("dashscope") < 0 && text.IndexOf("Bearer") < 0
+                && text.IndexOf("ark.cn-beijing") < 0, "");
+            Hit(sb, ref pass, ref total, "说明与指令口径一致（都提 Hy4/Hy3 与积分）",
+                note.IndexOf("积分") >= 0 && text.IndexOf("积分") >= 0
+                && note.IndexOf("Hy4") >= 0 && text.IndexOf("Hy4") >= 0, "");
+
+            MainWindow w = app == null ? null : app.SelfTestWindow;
+            Hit(sb, ref pass, ref total, "自检窗口已就绪", w != null, "");
+            if (w != null)
+            {
+                Hit(sb, ref pass, ref total, "静态图右键菜单真有代出片入口",
+                    w.SelfTestHasBuddyMenuItem(still), "");
+                Hit(sb, ref pass, ref total, "视频条目不出现代出片入口",
+                    !w.SelfTestHasBuddyMenuItem(video), "");
+            }
+
+            // 纯函数跑完：工单队列不能多一张，也不能凭空造出目标 mp4
+            int before = 0, after = 0;
+            try
+            {
+                before = Directory.Exists(CloudGen.QueueDir)
+                    ? Directory.GetFiles(CloudGen.QueueDir, "*.json").Length : 0;
+            }
+            catch { }
+            CloudGen.BuildBuddyRequest(still, img, lib, 3);
+            try
+            {
+                after = Directory.Exists(CloudGen.QueueDir)
+                    ? Directory.GetFiles(CloudGen.QueueDir, "*.json").Length : 0;
+            }
+            catch { }
+            Hit(sb, ref pass, ref total, "生成指令零工单写入",
+                before == after && !File.Exists(CloudGen.JobPath(still.Id)),
+                "queue " + before + " → " + after);
+            Hit(sb, ref pass, ref total, "没有凭空造出目标 mp4 或碰到壁纸库",
+                !File.Exists(target), target);
+
+            // ---- 11-15 追加：默认通道要真能下单、显示状态、到货自动收 ----
+            string savedDirOverride = ConfigStore.DirOverride;
+            string savedLib = app.Config.LibRoot;
+            string savedChannel = app.Config.GenChannel;
+            List<WallpaperItem> savedItems = app.Items;
+            bool savedNoBuddyDialogs = App.SelfTestNoBuddyDialogs;
+            MessageBoxResult savedBuddyAnswer = App.SelfTestBuddyAnswer;
+            bool savedNoClipboard = App.SelfTestNoClipboard;
+            bool savedNoPlay = App.SelfTestNoPlay;
+            bool savedNoPlayerOps = app.SelfTestNoPlayerOps;
+            int queueBefore = CloudGen.PendingCount();
+
+            string tmp2 = Path.Combine(baseDir, ".selftest-tmp", "buddy-channel");
+            string lib2 = Path.Combine(tmp2, "lib");
+            string img2 = Path.Combine(lib2, "images", still.Id + ".jpg");
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(lib2, "images"));
+                Directory.CreateDirectory(Path.Combine(lib2, "videos"));
+                File.WriteAllBytes(img2, Encoding.UTF8.GetBytes("buddy probe image"));
+                still.ImagePath = img2;
+                still.File = "images/" + still.Id + ".jpg";
+                ConfigStore.DirOverride = Path.Combine(tmp2, "cfg");
+                app.Config.LibRoot = lib2;
+                app.Config.GenChannel = "buddy";
+                app.Items = new List<WallpaperItem>();
+                app.Items.Add(still);
+                App.SelfTestNoBuddyDialogs = true;
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+                App.SelfTestNoClipboard = true;
+                App.SelfTestNoPlay = true;
+                app.SelfTestNoPlayerOps = true;
+                CloudGen.RemoveBuddyJob(still.Id);
+                RelatedVideo.Invalidate();
+
+                Hit(sb, ref pass, ref total, "默认出片通道是 WorkBuddy 积分",
+                    app.IsBuddyChannel(), "");
+                app.Config.GenChannel = "api";
+                Hit(sb, ref pass, ref total, "显式切成 api 才走按秒付费直连",
+                    !app.IsBuddyChannel(), "");
+                app.Config.GenChannel = "buddy";
+
+                string chanLabel = "";
+                int chanIndex = -1;
+                try
+                {
+                    SettingsWindow sw = new SettingsWindow(app);
+                    chanLabel = sw.SelfTestChannelLabel();
+                    chanIndex = sw.SelfTestChannelSelectedIndex();
+                    sw.Close();
+                }
+                catch (Exception ex) { chanLabel = "× 异常 " + ex.Message; }
+                Hit(sb, ref pass, ref total, "设置面板默认选中 WorkBuddy 积分",
+                    chanLabel.IndexOf("WorkBuddy") >= 0 && chanIndex == 0, chanLabel);
+
+                int dlgBefore = App.BuddyDialogCount;
+                app.StartBuddyGen(still);
+                string job = CloudGen.BuddyJobPath(still.Id);
+                string jobText = File.Exists(job) ? File.ReadAllText(job) : "";
+                Hit(sb, ref pass, ref total, "点「云端生成」真的弹了积分告知",
+                    App.BuddyDialogCount == dlgBefore + 1, "");
+                Hit(sb, ref pass, ref total, "弹窗写明积分量级与「现在不扣积分」",
+                    App.LastBuddyDialog.IndexOf("50~100") >= 0
+                    && App.LastBuddyDialog.IndexOf("不扣积分") >= 0
+                    && App.LastBuddyDialog.IndexOf("Hy4 / Hy3") >= 0, "");
+                Hit(sb, ref pass, ref total, "真的登记了 WorkBuddy 待领工单",
+                    File.Exists(job), job);
+                Hit(sb, ref pass, ref total, "工单标注积分通道与待领状态",
+                    jobText.IndexOf("workbuddy-credits") >= 0
+                    && jobText.IndexOf("waiting-for-workbuddy") >= 0, "");
+                Hit(sb, ref pass, ref total, "工单写明源图与目标 videos\\<id>.mp4",
+                    jobText.IndexOf("zz-buddy-hint.jpg") >= 0
+                    && jobText.IndexOf("zz-buddy-hint.mp4") >= 0, "");
+                Hit(sb, ref pass, ref total, "绝不写 queue 工单（不会误走付费直连）",
+                    !File.Exists(CloudGen.JobPath(still.Id))
+                    && CloudGen.PendingCount() == queueBefore, "queue=" + queueBefore);
+                Hit(sb, ref pass, ref total, "出片指令已生成（自检不写系统剪贴板）",
+                    App.LastCopiedText.IndexOf(still.Id) >= 0
+                    && App.LastCopiedText.IndexOf("videos\\") >= 0, "");
+                Hit(sb, ref pass, ref total, "状态是「等 Buddy 出片」而不是「生成中」",
+                    CloudGen.StateOf(app.Config, still) == CloudGen.State.BuddyPending,
+                    CloudGen.StateOf(app.Config, still).ToString());
+                MainWindow w2 = app.SelfTestWindow;
+                Hit(sb, ref pass, ref total, "卡片角标真的显示「等 Buddy 出片」",
+                    w2 != null && w2.SelfTestBadgeText(still.Id) == "⏳ 等 Buddy 出片",
+                    w2 == null ? "窗口空" : w2.SelfTestBadgeText(still.Id));
+
+                // 取消 / 改用付费：这两种选择都不许登记工单、不许扣积分
+                CloudGen.RemoveBuddyJob(still.Id);
+                App.SelfTestBuddyAnswer = MessageBoxResult.Cancel;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "点「取消」不登记工单",
+                    !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
+                App.SelfTestBuddyAnswer = MessageBoxResult.No;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "选「改用服务商 Key」本次不登记积分工单",
+                    !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
+
+                // 到货：WorkBuddy 会话把 mp4 放进 videos\ → 自动收工单、状态转 Ready
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+                app.StartBuddyGen(still);
+                string vid2 = Path.Combine(lib2, "videos", still.Id + ".mp4");
+                File.WriteAllBytes(vid2, Encoding.UTF8.GetBytes("fake arrived clip"));
+                RelatedVideo.Invalidate();
+                app.SweepCloudJobs();
+                Hit(sb, ref pass, ref total, "片子到货自动收掉待领工单",
+                    !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
+                Hit(sb, ref pass, ref total, "到货后状态转为 Ready（有片可播）",
+                    CloudGen.StateOf(app.Config, still) == CloudGen.State.Ready,
+                    CloudGen.StateOf(app.Config, still).ToString());
+                Hit(sb, ref pass, ref total, "收货过程没有补写 queue 工单",
+                    !File.Exists(CloudGen.JobPath(still.Id)), "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "通道自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                try { CloudGen.RemoveBuddyJob(still.Id); } catch { }
+                app.Config.LibRoot = savedLib;
+                app.Config.GenChannel = savedChannel;
+                ConfigStore.DirOverride = savedDirOverride;
+                app.Items = savedItems;
+                App.SelfTestNoBuddyDialogs = savedNoBuddyDialogs;
+                App.SelfTestBuddyAnswer = savedBuddyAnswer;
+                App.SelfTestNoClipboard = savedNoClipboard;
+                App.SelfTestNoPlay = savedNoPlay;
+                app.SelfTestNoPlayerOps = savedNoPlayerOps;
+                RelatedVideo.Invalidate();
+                try { if (Directory.Exists(tmp2)) Directory.Delete(tmp2, true); } catch { }
+            }
+
+            return Finish(sb, pass, total);
+        }
     }
 }

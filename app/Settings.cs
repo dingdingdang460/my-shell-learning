@@ -71,6 +71,7 @@ namespace WallpaperManager
         readonly TextBox proxyBox = new TextBox();
         readonly TextBox cacheBox = new TextBox();
         readonly TextBlock cacheInfo = new TextBlock();
+        readonly ComboBox chanBox = new ComboBox();      // 出片通道：WorkBuddy 积分 / 服务商 API Key
         readonly ComboBox provBox = new ComboBox();
         readonly PasswordBox keyBox = new PasswordBox();
         readonly ComboBox modelCombo = new ComboBox();    // 模型改成下拉：看得见单价和大概等多久
@@ -288,6 +289,24 @@ namespace WallpaperManager
             genHint.Margin = new Thickness(0, 6, 0, 0);
             root.Children.Add(genHint);
 
+            // 11-15：主人问「能不能用 WorkBuddy 里免费的 Hy4 / Hy3」。
+            // 答案写在面板上，别让人以为下拉里少了两个免费模型。
+            TextBlock buddyNote = new TextBlock();
+            buddyNote.Text = CloudGen.BuddyNote;
+            buddyNote.FontSize = 11;
+            buddyNote.LineHeight = 18;
+            buddyNote.TextWrapping = TextWrapping.Wrap;
+            buddyNote.Foreground = new SolidColorBrush(Color.FromRgb(232, 198, 138));
+            buddyNote.Margin = new Thickness(0, 12, 0, 2);
+            root.Children.Add(buddyNote);
+
+            root.Children.Add(Label("出片通道（点「云端生成」走哪条）"));
+            chanBox.Items.Add("优先 WorkBuddy 积分（默认：不用填 Key，消耗积分出片）");
+            chanBox.Items.Add("服务商 API Key（按秒付费，百炼 / 方舟直连）");
+            chanBox.SelectedIndex = 0;
+            StyleCombo(chanBox);
+            root.Children.Add(chanBox);
+
             root.Children.Add(Label("服务商"));
             provBox.Items.Add("不用云端模型（点生成会提示先配置）");
             provBox.Items.Add("通义万相 DashScope（按秒计价，最便宜）");
@@ -472,6 +491,18 @@ namespace WallpaperManager
         /// 自检用（--cloudcfgtest）：真实操作设置面板的控件，核对模型联动、费用计算、
         /// 1080P 加价、配置落盘往返。全程只动新建的自检窗口，不改 app.Config。
         /// </summary>
+        /// <summary>自检用：读出「出片通道」下拉当前文字，确认默认就是 WorkBuddy 积分。</summary>
+        public string SelfTestChannelLabel()
+        {
+            object sel = chanBox.SelectedItem;
+            return sel == null ? "" : sel.ToString();
+        }
+
+        public int SelfTestChannelSelectedIndex()
+        {
+            return chanBox.SelectedIndex;
+        }
+
         public string SelfTestCloudModels()
         {
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
@@ -762,6 +793,9 @@ namespace WallpaperManager
             proxyBox.Text = c.Proxy == null ? "" : c.Proxy;
             cacheBox.Text = c.CacheLimitMb.ToString(CultureInfo.InvariantCulture);
 
+            // 11-15：出片通道。老配置缺字段时 Load 已回填 buddy，这里照样按值选中
+            chanBox.SelectedIndex = c.GenChannel == "api" ? 1 : 0;
+
             // 云端模型配置：先切服务商（会重建模型下拉），再按保存的 ID 精确选中
             int pi = 0;
             if (c.GenProvider == "wanx") pi = 1;
@@ -810,6 +844,9 @@ namespace WallpaperManager
             c.CacheLimitMb = cacheMb;
             int dropped = WallpaperFit.TrimTo(cacheMb * 1024L * 1024L);
             if (dropped > 0) Log.Note("缓存超上限，已清掉 " + dropped + " 张合成图");
+
+            // 11-15：出片通道先存，默认是 WorkBuddy 积分；切成 api 才走按秒付费直连
+            c.GenChannel = chanBox.SelectedIndex == 1 ? "api" : "buddy";
 
             // 云端模型：服务商 + Key + 目录里的模型 ID + 分辨率，四件套一起存
             c.GenProvider = provBox.SelectedIndex == 1 ? "wanx" : (provBox.SelectedIndex == 2 ? "ark" : "");

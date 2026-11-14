@@ -4,16 +4,18 @@ cd /d "%~dp0"
 
 rem ============================================================
 rem  Package: turn app\bin into a portable folder + zip
-rem  Output: dist\WallpaperManager-v0.9.1\ and .zip
+rem  Output: dist\WallpaperManager-v0.9.2\ and .zip
 rem  No admin rights, no registry writes.
 rem
-rem  11-13: cloud generation goes straight to the model API (Wanx / Ark)
+rem  11-13: paid channel goes straight to the model API (Wanx / Ark)
 rem  from inside the app. The local motion script is RETIRED, so
 rem  tools\gen-motion.* is no longer shipped. Target machines need
-rem  neither Python nor numpy / Pillow, just an API Key in Settings.
+rem  neither Python nor numpy / Pillow.
+rem  11-15: DEFAULT channel is WorkBuddy credits (no API Key needed);
+rem  switch to "Service API Key" in Settings only for paid direct generation.
 rem ============================================================
 
-set "VER=v0.9.1"
+set "VER=v0.9.2"
 set "DST=dist\WallpaperManager-%VER%"
 
 if not exist "app\bin\WallpaperManager.exe" goto :nobuild
@@ -39,8 +41,9 @@ echo.
 echo Done:
 echo   %DST%\       (portable folder)
 echo   %DST%.zip
-echo   NOTE: cloud generation needs an API Key from Aliyun Bailian / Volcengine Ark,
-echo         filled in Settings. No Python or local script is required.
+echo   NOTE: default cloud channel uses WorkBuddy credits (no API Key needed).
+echo         Switch to "Service API Key" in Settings only for paid per-second
+echo         direct generation. No Python or local script is required.
 exit /b 0
 
 :nobuild

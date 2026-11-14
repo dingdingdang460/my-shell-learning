@@ -549,6 +549,9 @@ namespace WallpaperManager
                 c.GenModel = Json.Str(d, "genModel");
                 c.GenResolution = Json.Str(d, "genResolution");
                 if (string.IsNullOrEmpty(c.GenResolution)) c.GenResolution = "720P";
+                // 11-15：老配置没有 genChannel → 默认「优先 WorkBuddy 积分」
+                string chan = Json.Str(d, "genChannel");
+                c.GenChannel = (chan == "api" || chan == "buddy") ? chan : "buddy";
 
                 // 功耗守卫：老配置里没有这两个键 → 默认「电池供电时暂停」+ 20% 阈值
                 c.Proxy = Json.Str(d, "proxy");
@@ -591,6 +594,7 @@ namespace WallpaperManager
                 sb.Append("  \"genApiKey\": ").Append(Json.Quote(c.GenApiKey)).Append(",\r\n");
                 sb.Append("  \"genModel\": ").Append(Json.Quote(c.GenModel)).Append(",\r\n");
                 sb.Append("  \"genResolution\": ").Append(Json.Quote(c.GenResolution)).Append(",\r\n");
+                sb.Append("  \"genChannel\": ").Append(Json.Quote(c.GenChannel)).Append(",\r\n");
                 sb.Append("  \"proxy\": ").Append(Json.Quote(c.Proxy)).Append(",\r\n");
                 sb.Append("  \"cacheLimitMb\": ").Append(c.CacheLimitMb).Append("\r\n");
                 sb.Append("}\r\n");

@@ -43,6 +43,19 @@ namespace WallpaperManager
         public static string DoneDir { get { return Path.Combine(Dir, "done"); } }
         public static string FailDir { get { return Path.Combine(Dir, "fail"); } }
 
+        /// <summary>
+        /// 11-15：WorkBuddy 积分通道的「待领工单」。跟 queue\ 必须分开：
+        /// queue\ = 应用直连服务商、后台线程自己会提交的单；
+        /// buddy\ = 等主人在 WorkBuddy 会话里粘贴指令并确认积分后才可能出片的单。
+        /// 分开放，老的「没配 API 绝不写假工单」断言依然成立，也不会被 RunApiJob 误提交。
+        /// </summary>
+        public static string BuddyDir { get { return Path.Combine(Dir, "buddy"); } }
+
+        public static string BuddyJobPath(string id)
+        {
+            return Path.Combine(BuddyDir, id + ".json");
+        }
+
         public static void EnsureDirs()
         {
             try
@@ -50,8 +63,61 @@ namespace WallpaperManager
                 Directory.CreateDirectory(QueueDir);
                 Directory.CreateDirectory(DoneDir);
                 Directory.CreateDirectory(FailDir);
+                Directory.CreateDirectory(BuddyDir);
             }
             catch { }
+        }
+
+        /// <summary>登记一张待领工单。只写盘，不复制剪贴板、不发请求、不扣任何积分。</summary>
+        public static bool WriteBuddyJob(AppConfig cfg, WallpaperItem it,
+                                         string imagePath, int seconds, out string msg)
+        {
+            msg = "";
+            if (it == null || string.IsNullOrEmpty(it.Id)) { msg = "条目为空"; return false; }
+            if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
+            { msg = "找不到这张图的本地文件，先把图下载下来"; return false; }
+            if (seconds < 1) seconds = 1;
+            if (seconds > MaxSeconds) seconds = MaxSeconds;
+            EnsureDirs();
+            try
+            {
+                StringBuilder s = new StringBuilder();
+                s.Append("{\r\n");
+                s.Append("  \"id\": ").Append(Json.Quote(it.Id)).Append(",\r\n");
+                s.Append("  \"title\": ").Append(Json.Quote(it.Title)).Append(",\r\n");
+                s.Append("  \"image\": ").Append(Json.Quote(imagePath)).Append(",\r\n");
+                s.Append("  \"out\": ").Append(Json.Quote(VideoPath(cfg.LibRoot, it.Id))).Append(",\r\n");
+                s.Append("  \"seconds\": ").Append(seconds).Append(",\r\n");
+                s.Append("  \"created\": ").Append(Now()).Append(",\r\n");
+                s.Append("  \"channel\": ").Append(Json.Quote("workbuddy-credits")).Append(",\r\n");
+                s.Append("  \"status\": ").Append(Json.Quote("waiting-for-workbuddy")).Append(",\r\n");
+                s.Append("  \"prompt\": ").Append(Json.Quote(BuildPrompt(it, seconds))).Append("\r\n");
+                s.Append("}\r\n");
+                File.WriteAllText(BuddyJobPath(it.Id), s.ToString(), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { msg = "登记待领工单失败：" + ex.Message; return false; }
+
+            Log.Note("WorkBuddy 积分通道：已登记待领工单 " + it.Id
+                     + "（未提交、未扣积分，等会话里确认）");
+            msg = "已登记 WorkBuddy 待领工单（等你在会话里确认，未扣积分）";
+            return true;
+        }
+
+        /// <summary>片子到货 / 主人取消时把待领工单收掉，卡片不再挂「等 Buddy 出片」。</summary>
+        public static void RemoveBuddyJob(string id)
+        {
+            try
+            {
+                string p = BuddyJobPath(id);
+                if (File.Exists(p)) File.Delete(p);
+            }
+            catch { }
+        }
+
+        public static int BuddyPendingCount()
+        {
+            try { return Directory.Exists(BuddyDir) ? Directory.GetFiles(BuddyDir, "*.json").Length : 0; }
+            catch { return 0; }
         }
 
         /// <summary>约定：图片 images\xxx.jpg ↔ 视频 videos\xxx.mp4（同名 id）</summary>
@@ -123,6 +189,72 @@ namespace WallpaperManager
                  + "subtle breathing. Camera completely static: no pan, no zoom, no drift, no shake. "
                  + "Duration exactly " + seconds + " seconds. Seamless loop: the last frame must match "
                  + "the first frame. No watermark, no logo, no text overlay, no caption, no border.";
+        }
+
+        // ---------------------------------------------------------------- 交给 WorkBuddy 代出片
+
+        /// <summary>
+        /// 11-15：主人问「云端生成能不能用 WorkBuddy 里配的 Hy4 / Hy3，都是免费的」。
+        /// 不能，且不是「少加一个下拉项」的问题：
+        ///   1) Hy4 / Hy3 是 WorkBuddy 客户端的对话 / 推理模型（图片输入 + 思考模式），
+        ///      只能看图、写字，产出不了 mp4；官方公告写明「生成图片与视频会切换到
+        ///      相应多模态模型完成，按正常规则产生积分消耗」，免费只覆盖对话额度，
+        ///      且限免到 2026-11-15 23:59、每日有额度上限。
+        ///   2) WorkBuddy 的模型配置（含内置与自定义）只供 WorkBuddy 自己转发对话用，
+        ///      Key 存在本地 workbuddy/models.json，独立 exe 拿不到它的额度或凭证。
+        ///   3) 这里是「提交图 → 轮询异步任务 → 下载 mp4」的图生视频接口，
+        ///      跟 /chat/completions 不是同一种协议，把 hy4 塞进 model 字段只会报错。
+        /// 所以模型下拉里绝不列这两个名字，免得主人以为选中就能免费出片。
+        ///
+        /// 但 WorkBuddy 会话本身有多模态出片能力，可以让 Buddy 代出一片、按约定命名
+        /// 丢进 videos\ —— 这条路径不填 Key、不花服务商的钱，但会消耗 WorkBuddy 积分。
+        /// 下面两段文案抽成常量，界面和自检共用，保证说法一致、不夸大「免费」。
+        /// </summary>
+        public const string BuddyNote =
+              "出片通道默认「优先 WorkBuddy 积分」：点「云端生成」会先把指令复制到剪贴板，"
+            + "粘到 WorkBuddy 会话，让 Buddy 用多模态模型图生视频，再把 mp4 放进 videos\\<id>.mp4，"
+            + "程序按画面识别后自动播放。不花服务商的钱，但会消耗 WorkBuddy 积分 —— "
+            + "不是 Hy4 / Hy3 的对话免费额度（限免到 2026-11-15 23:59，每日有免费额度，触及后消耗积分）。\n"
+            + "关于 Hy4 / Hy3：它们是 WorkBuddy 客户端的对话 / 推理模型（图片输入 + 思考模式），"
+            + "只能看图、写字，生成不了 mp4；本程序是独立 exe，不共享 WorkBuddy 的模型额度或 API Key，"
+            + "所以模型列表里只有两家的图生视频模型，不会列出它们 —— 选了也出不了片。\n"
+            + "想改成按秒付费：把「出片通道」切到「服务商 API Key」，填自己的百炼 / 方舟 Key 直连即可。";
+
+        public const string BuddyMenuLabel = "⧉ 复制交给 WorkBuddy 的指令（不填 Key）";
+        public const string BuddyMenuTip =
+              "Hy4 / Hy3 是 WorkBuddy 的免费对话模型，不能生成视频；"
+            + "这条指令让 Buddy 用多模态能力代出片（会消耗积分）。只复制文字，不下单、不扣费。";
+
+        /// <summary>
+        /// 只生成那段可以粘进 WorkBuddy 会话的话，是纯函数：
+        /// 不写剪贴板、不写工单、不发请求、不碰磁盘，也绝不会自动触发积分消耗。
+        /// 真要出片由主人在会话里粘贴、看到积分提示后自己确认。
+        /// </summary>
+        public static string BuildBuddyRequest(WallpaperItem it, string imagePath, string libRoot, int seconds)
+        {
+            if (it == null || string.IsNullOrEmpty(it.Id)) return "";
+            if (seconds < 1) seconds = 1;
+            if (seconds > MaxSeconds) seconds = MaxSeconds;
+            string outPath = Path.Combine(string.IsNullOrEmpty(libRoot) ? "" : libRoot,
+                                          "videos", it.Id + ".mp4");
+
+            StringBuilder sb = new StringBuilder();
+            sb.Append("请用多模态视频生成能力，把这张壁纸做成 ").Append(seconds)
+              .Append(" 秒的无缝循环飘动短片。\r\n\r\n");
+            sb.Append("壁纸 id：").Append(it.Id).Append("\r\n");
+            sb.Append("源图（作为首帧，严格保持画面不变）：").Append(imagePath ?? "").Append("\r\n");
+            sb.Append("出片后请把 MP4 放到：").Append(outPath).Append("\r\n");
+            sb.Append("（这个路径在壁纸库里，写入前请先跟我确认；放好后壁纸管家会自动识别并播放，")
+              .Append("不用在程序里填 API Key。）\r\n\r\n");
+            sb.Append("要求：").Append(seconds)
+              .Append(" 秒、720P、无水印无字幕、镜头完全静止、首尾帧一致可循环。\r\n");
+            sb.Append("提示词：").Append(BuildPrompt(it, seconds)).Append("\r\n\r\n");
+            sb.Append("费用说明：这一步走的是视频生成模型，会消耗 WorkBuddy 积分；\r\n");
+            sb.Append("Hy4 / Hy3 的限时免费只覆盖对话额度，不包含图片与视频生成。\r\n");
+            sb.Append("请先告诉我预计消耗多少积分，等我确认后再生成，不要直接扣。\r\n");
+            sb.Append("另外：如果 videos\\ 里已经有跟这张图同一画面的片子，就别重新生成，")
+              .Append("直接告诉我就行 —— 壁纸管家会按画面匹配并直接播放。");
+            return sb.ToString();
         }
 
         /// <summary>
@@ -244,7 +376,7 @@ namespace WallpaperManager
         /// 界面就跟着写「生成中」，实际那张 JSON 要挂两天才超时。现在单独分出来，
         /// 界面必须写「待人工处理」，绝不冒充正在生成。
         /// </summary>
-        public enum State { None, Queued, Ready, Failed, Manual }
+        public enum State { None, Queued, Ready, Failed, Manual, BuddyPending }
 
         public static State StateOf(AppConfig cfg, WallpaperItem it)
         {
@@ -258,6 +390,9 @@ namespace WallpaperManager
             // 11-14：备份 / 变体命名 / 关联子文件夹 / 画面确认同一张的散片，都算「已就绪」，
             // 界面菜单才不会把「播放这段视频」错写成「云端生成（要花钱）」。
             if (!it.IsVideo && RelatedVideo.Find(cfg.LibRoot, it, null) != null) return State.Ready;
+            // 11-15：登记了 WorkBuddy 待领工单，但会话还没确认出片。
+            // 这是真实状态，绝不写成「生成中」——不会有人背地里在跑任务。
+            if (!it.IsVideo && File.Exists(BuddyJobPath(it.Id))) return State.BuddyPending;
             if (File.Exists(Path.Combine(FailDir, it.Id + ".json"))) return State.Failed;
             return State.None;
         }

@@ -38,6 +38,7 @@ namespace WallpaperManager
             public bool HasVideo;
             public bool Queued;
             public bool Manual;
+            public bool BuddyPending;   // 11-15：登记了 WorkBuddy 待领工单，等会话确认出片
         }
 
         // ---- 云端任务浮条 ----
@@ -2908,6 +2909,9 @@ namespace WallpaperManager
             info.Queued = !info.HasVideo && !it.IsVideo && cardState == CloudGen.State.Queued;
             // 11-14：没配 API 的工单绝不打「生成中」角标，那是假状态。
             info.Manual = !info.HasVideo && !it.IsVideo && cardState == CloudGen.State.Manual;
+            // 11-15：WorkBuddy 积分通道的待领工单是真实状态，但绝不写成「生成中」
+            info.BuddyPending = !info.HasVideo && !it.IsVideo
+                                && cardState == CloudGen.State.BuddyPending;
 
             Border badge = new Border();
             badge.CornerRadius = new CornerRadius(0, 8, 8, 0);
@@ -3021,6 +3025,29 @@ namespace WallpaperManager
             }
         }
 
+        /// <summary>
+        /// 自检用：真去建一次右键菜单，确认静态图里确实有「复制交给 WorkBuddy 的指令」这一项。
+        /// 只验文案存在，不触发点击，避免自检真去写剪贴板。
+        /// </summary>
+        public bool SelfTestHasBuddyMenuItem(WallpaperItem it)
+        {
+            if (it == null || it.IsVideo) return false;
+            ContextMenu cm = BuildMenu(it);
+            for (int i = 0; i < cm.Items.Count; i++)
+            {
+                MenuItem mi = cm.Items[i] as MenuItem;
+                if (mi == null) continue;
+                for (int k = 0; k < mi.Items.Count; k++)
+                {
+                    MenuItem sub = mi.Items[k] as MenuItem;
+                    if (sub == null) continue;
+                    string h = sub.Header == null ? "" : sub.Header.ToString();
+                    if (h.IndexOf("WorkBuddy", StringComparison.Ordinal) >= 0) return true;
+                }
+            }
+            return false;
+        }
+
         ContextMenu BuildMenu(WallpaperItem it)
         {
             ContextMenu cm = new ContextMenu();
@@ -3066,6 +3093,13 @@ namespace WallpaperManager
                     mCloud.Header = "云端生成：有一张不会自动出片的旧工单（点此查看）";
                     mCloud.Click += delegate { app.OpenJobFolder(it.Id); };
                 }
+                else if (cs == CloudGen.State.BuddyPending)
+                {
+                    // 11-15：待领工单还在，点一下重新拿指令（不会重复登记、不会重复扣积分）。
+                    mCloud.Header = "云端生成：等 Buddy 出片（点此重新复制指令）";
+                    mCloud.ToolTip = "WorkBuddy 积分通道：会话确认后才会生成 mp4，现在没有扣积分。";
+                    mCloud.Click += delegate { app.StartBuddyGen(it); };
+                }
                 else
                 {
                     mCloud.Header = cs == CloudGen.State.Queued ? "云端生成：生成中…"
@@ -3082,6 +3116,19 @@ namespace WallpaperManager
 
                 mDyn.Items.Add(mCloud);
                 if (mRegen != null) mDyn.Items.Add(mRegen);
+
+                // 11-15：不填 Key 的替代出片路径。只复制一段话，绝不下单、不扣费。
+                MenuItem mBuddy = new MenuItem();
+                mBuddy.Header = CloudGen.BuddyMenuLabel;
+                mBuddy.ToolTip = CloudGen.BuddyMenuTip;
+                mBuddy.Click += delegate { app.CopyBuddyRequest(it); };
+                mDyn.Items.Add(new Separator());
+                mDyn.Items.Add(mBuddy);
+
+                MenuItem mBuddyFolder = new MenuItem();
+                mBuddyFolder.Header = "查看 WorkBuddy 待领工单";
+                mBuddyFolder.Click += delegate { app.OpenBuddyFolder(); };
+                mDyn.Items.Add(mBuddyFolder);
                 mDyn.Items.Add(fxOff);
             }
 
@@ -3225,8 +3272,9 @@ namespace WallpaperManager
             bool playing = app.IsPlaying(info.Item, alive);
             bool queued = info.Queued;
             bool manual = info.Manual;
+            bool buddy = info.BuddyPending;
 
-            if (!info.HasVideo && !playing && !queued && !manual)
+            if (!info.HasVideo && !playing && !queued && !manual && !buddy)
             {
                 badge.Visibility = Visibility.Collapsed;
                 bt.Text = "";
@@ -3238,15 +3286,19 @@ namespace WallpaperManager
                 ? new SolidColorBrush(Color.FromArgb(228, 46, 92, 168))
                 : queued
                     ? new SolidColorBrush(Color.FromArgb(220, 40, 78, 84))
-                    : manual
-                        ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
-                        : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
+                    : buddy
+                        ? new SolidColorBrush(Color.FromArgb(220, 118, 84, 40))
+                        : manual
+                            ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
+                            : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
 
             bt.Text = playing ? "▶ 播放中"
                     : queued ? "☁ 生成中"
+                    : buddy ? "⏳ 等 Buddy 出片"
                     : manual ? "⏸ 待处理" : "✦ 飘动";
             bt.Foreground = playing ? Brushes.White
                                     : queued ? new SolidColorBrush(Color.FromRgb(168, 232, 226))
+                                    : buddy ? new SolidColorBrush(Color.FromRgb(255, 214, 158))
                                     : manual ? new SolidColorBrush(Color.FromRgb(240, 206, 146))
                                              : new SolidColorBrush(Color.FromRgb(228, 217, 255));
         }

@@ -181,7 +181,8 @@ namespace WallpaperManager
                     || s.Equals("--clouddialogtest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--contenttest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--badgetest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--launchtest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--launchtest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--buddyhinttest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -756,6 +757,28 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --launchtest：\r\n" + detail);
                         Log.Note("自检 --launchtest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--buddyhinttest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-15：验「WorkBuddy 免费模型」的界面口径与代出片指令，
+                    // 并确认纯函数零下单、零请求、零文件写入。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.BuddyHint(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --buddyhinttest：\r\n" + detail);
+                        Log.Note("自检 --buddyhinttest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -1917,6 +1940,14 @@ namespace WallpaperManager
                 return;
             }
 
+            // 11-15：「重新生成一片」也走默认通道（同样优先 WorkBuddy 积分），
+            // 会先提醒「再消耗一次积分」；旧片不删不改名。
+            if (IsBuddyChannel())
+            {
+                forceRegenId = "";
+                StartBuddyGen(it, true);
+                return;
+            }
             forceRegenId = it.Id;
             if (win == null)
             {
@@ -1930,6 +1961,136 @@ namespace WallpaperManager
                     ? Config.GenSeconds : CloudGen.MaxSeconds;
             win.CloudChoose(it.Id, it.Title, ready, p, Config.GenModel, Config.GenResolution, sec);
             win.SetStatus("重新生成：确认后会重新计费，旧片先留 .bak-regen-* 备份");
+        }
+
+        /// <summary>
+        /// 11-15：右键「复制交给 WorkBuddy 的指令」。
+        /// 只把一段话放进剪贴板：不下单、不写工单、不向任何服务商发请求、不扣费，
+        /// 也不触碰壁纸库里的任何文件。真正的出片由主人在 WorkBuddy 会话里看到积分提示后确认。
+        /// </summary>
+        public void CopyBuddyRequest(WallpaperItem it)
+        {
+            if (it == null) return;
+            string img = LocalImageFor(it);
+            if (string.IsNullOrEmpty(img))
+            {
+                if (win != null) win.SetStatus("找不到这张图的本地文件，先把图下载下来");
+                return;
+            }
+            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
+                    ? Config.GenSeconds : CloudGen.MaxSeconds;
+            string text = CloudGen.BuildBuddyRequest(it, img, Config.LibRoot, sec);
+            try
+            {
+                Clipboard.SetText(text);
+                if (win != null) win.SetStatus(
+                    "已复制指令：粘到 WorkBuddy 会话即可让 Buddy 代出片（视频生成消耗积分，不是 Hy4/Hy3 对话免费额度）");
+                Log.Note("已复制 WorkBuddy 代出片指令：" + it.Id + "（未下单、未发请求、未扣费）");
+            }
+            catch (Exception ex)
+            {
+                if (win != null) win.SetStatus("复制失败：" + ex.Message);
+                Log.Note("!! 复制 WorkBuddy 指令失败：" + ex.Message);
+            }
+        }
+
+        /// <summary>默认出片通道：优先 WorkBuddy 积分；只有显式切成 "api" 才走按秒付费直连。</summary>
+        public bool IsBuddyChannel()
+        {
+            return Config == null || Config.GenChannel != "api";
+        }
+
+        /// <summary>
+        /// 11-15：云端生成的**默认通道** —— 优先消耗 WorkBuddy 积分。
+        /// 一次点击会真做四件事：告知积分消耗 → 登记待领工单（独立目录，绝不被直连线程误提交）
+        /// → 把出片指令放进剪贴板 → 卡片状态变成「等 Buddy 出片」。
+        /// 片子按约定落到 videos\&lt;id&gt;.mp4 后 SweepBuddyJobs 自动收货、自动换桌面。
+        /// 这一步不向服务商发请求、不写 queue 工单、不扣任何积分；
+        /// 真出片由 WorkBuddy 会话（手动粘贴指令 / 自动领单）确认后执行。
+        /// </summary>
+        public void StartBuddyGen(WallpaperItem it)
+        {
+            StartBuddyGen(it, false);
+        }
+
+        public void StartBuddyGen(WallpaperItem it, bool regen)
+        {
+            if (it == null) return;
+            string img = LocalImageFor(it);
+            if (string.IsNullOrEmpty(img))
+            {
+                if (win != null) win.SetStatus("找不到这张图的本地文件，先把图下载下来");
+                return;
+            }
+            if (!regen)
+            {
+                string existing = VideoFor(it);
+                if (existing != null)
+                {
+                    string useMsg;
+                    UseExistingVideo(it, existing, out useMsg);
+                    return;
+                }
+            }
+            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
+                    ? Config.GenSeconds : CloudGen.MaxSeconds;
+            string text = CloudGen.BuildBuddyRequest(it, img, Config.LibRoot, sec);
+            string target = CloudGen.VideoPath(Config.LibRoot, it.Id);
+
+            string body = (regen
+                    ? "「重新生成一片」会再消耗一次 WorkBuddy 积分，旧片保留。\r\n\r\n" : "")
+                + "出片通道：优先 WorkBuddy 积分（不花服务商的钱、不用填 API Key）。\r\n\r\n"
+                + "点「是」：登记待领工单 + 把出片指令复制到剪贴板；\r\n"
+                + "         粘到 WorkBuddy 会话（或等客户端自动领单）后才会真的生成 mp4。\r\n"
+                + "点「否」：改用服务商 API Key（按秒付费），本次不出片。\r\n"
+                + "点「取消」：什么都不做。\r\n\r\n"
+                + "费用：视频生成走多模态模型，会消耗 WorkBuddy 积分"
+                + "（约 50~100 积分 / 5 秒，3 秒片按比例，实际以客户端提示为准）；"
+                + "Hy4 / Hy3 的对话免费额度不包含出片。\r\n"
+                + "现在这一步只登记工单和复制文字：不提交、不扣积分、不改壁纸库文件，"
+                + "也不会向服务商发请求。\r\n\r\n"
+                + "目标文件：" + target + "\r\n"
+                + "待领工单目录：" + CloudGen.BuddyDir;
+            LastBuddyDialog = body;
+            BuddyDialogCount++;
+            Log.Note("WorkBuddy 积分通道：已告知积分消耗（" + it.Id + "），未扣费");
+
+            MessageBoxResult r = SelfTestNoBuddyDialogs
+                ? SelfTestBuddyAnswer
+                : MessageBox.Show(body, "壁纸管家 · 用 WorkBuddy 积分出片",
+                                  MessageBoxButton.YesNoCancel, MessageBoxImage.Information,
+                                  MessageBoxResult.Yes);
+            if (r == MessageBoxResult.Cancel)
+            {
+                if (win != null) win.SetStatus("已取消：没下单、没扣积分、没改文件");
+                return;
+            }
+            if (r == MessageBoxResult.No)
+            {
+                if (win != null) win.SetStatus(
+                    "本次没出片；要用按秒付费，请在「设置 → 出片通道」切成服务商 API Key 并填 Key");
+                if (!SelfTestNoBuddyDialogs) OpenSettings();
+                return;
+            }
+
+            string err;
+            bool wrote = CloudGen.WriteBuddyJob(Config, it, img, sec, out err);
+            LastCopiedText = text;
+            if (!SelfTestNoClipboard)
+            {
+                try { Clipboard.SetText(text); }
+                catch (Exception ex) { Log.Note("!! 复制 WorkBuddy 指令失败：" + ex.Message); }
+            }
+            pendingApplyId = it.Id;     // 到货自动换桌面，纯内存，不写 config
+            if (win != null)
+            {
+                win.SetStatus(wrote
+                    ? "WorkBuddy 积分通道：已登记待领工单、指令已复制（没扣积分）；确认出片后自动换上桌面"
+                    : "登记待领工单失败：" + err);
+                win.RefreshList();      // 让卡片立刻显示「等 Buddy 出片」
+            }
+            Log.Note("WorkBuddy 积分通道：" + it.Id + " 工单=" + wrote
+                     + " 指令=" + text.Length + " 字符；未提交、未扣积分");
         }
 
         /// <summary>
@@ -1957,6 +2118,8 @@ namespace WallpaperManager
                 QueueCloudGen(it, LocalImageFor(it), out msg);
                 return;
             }
+            // 11-15：默认优先消耗 WorkBuddy 积分，不再一上来就要求填服务商 Key。
+            if (IsBuddyChannel()) { StartBuddyGen(it); return; }
             GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
             bool ready = GenApi.Ready(Config);
             int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
@@ -2014,6 +2177,14 @@ namespace WallpaperManager
         /// 不写工单、不改状态、不显示生成中，也不会向任何服务商发请求、不会扣费。
         /// 自检用 SelfTestNoDialogs / SelfTestCloudAnswer 注入，不弹真窗口。
         /// </summary>
+        // 11-15：WorkBuddy 积分通道的弹窗 / 剪贴板注入，生产路径一律关着
+        internal static bool SelfTestNoBuddyDialogs = false;
+        internal static MessageBoxResult SelfTestBuddyAnswer = MessageBoxResult.Cancel;
+        internal static string LastBuddyDialog = "";
+        internal static int BuddyDialogCount = 0;
+        internal static bool SelfTestNoClipboard = false;
+        internal static string LastCopiedText = "";
+
         internal static bool SelfTestNoDialogs = false;
         internal static MessageBoxResult SelfTestCloudAnswer = MessageBoxResult.No;
         internal static string LastCloudDialog = "";
@@ -2042,7 +2213,10 @@ namespace WallpaperManager
                 + "可选两家：通义万相 wan2.6-i2v-flash（720P 约 ¥0.15/秒）、"
                 + "火山方舟 Doubao-Seedance（约 ¥0.2~0.6/秒）。\r\n\r\n"
                 + "点「是」打开设置填好服务商和 API Key；点「否」先不生成。\r\n"
-                + "已经有片子的话，把 mp4 改名成 " + it.Id + ".mp4 放进 videos\\ 就会自动识别并播放。\r\n\r\n"
+                + "已经有片子的话，把 mp4 改名成 " + it.Id + ".mp4 放进 videos\\ 就会自动识别并播放。\r\n"
+                + "当前出片通道是「服务商 API Key（按秒付费）」。想改成优先消耗 WorkBuddy 积分、"
+                + "不用填 Key：去「设置 → 出片通道」切回默认项即可；多模态出片会消耗 WorkBuddy 积分，"
+                + "不属于 Hy4 / Hy3 的对话免费额度。\r\n\r\n"
                 + "工单目录：" + CloudGen.QueueDir;
 
             LastCloudDialog = body;
@@ -2060,6 +2234,21 @@ namespace WallpaperManager
                 + "也不会自动出片。去「设置 → 云端生成」填好即可。";
             if (r == MessageBoxResult.Yes) OpenSettings();
             return r == MessageBoxResult.Yes;
+        }
+
+        /// <summary>11-15：WorkBuddy 积分通道的待领工单也要看得见、摸得着。</summary>
+        public void OpenBuddyFolder()
+        {
+            try
+            {
+                CloudGen.EnsureDirs();
+                Process.Start("explorer.exe", CloudGen.BuddyDir);
+                if (win != null) win.SetStatus("待领工单目录：" + CloudGen.BuddyDir);
+            }
+            catch (Exception ex)
+            {
+                if (win != null) win.SetStatus("打开待领工单目录失败：" + ex.Message);
+            }
         }
 
         /// <summary>「我下单在哪能看到？」—— 直接打开工单目录并选中这张单。</summary>
@@ -2771,8 +2960,59 @@ namespace WallpaperManager
         /// 每几秒扫一遍生成队列：视频到货就入库、标云端动效、必要时直接换上；
         /// 超过 30 分钟还没到货就当失败，别让队列永远挂着一条「生成中」。
         /// </summary>
+        /// <summary>
+        /// 11-15：WorkBuddy 积分通道的收货。WorkBuddy 会话把 mp4 按约定放进 videos\
+        /// （规范名 / 备份 / 同画面散片都算），这里就收掉待领工单、把卡片标成动态、
+        /// 需要的话自动换上桌面。没到货时什么都不做，绝不假装正在生成。
+        /// </summary>
+        void SweepBuddyJobs()
+        {
+            try
+            {
+                if (!Directory.Exists(CloudGen.BuddyDir)) return;
+                string[] jobs = Directory.GetFiles(CloudGen.BuddyDir, "*.json");
+                for (int i = 0; i < jobs.Length; i++)
+                {
+                    string id, image;
+                    int sec;
+                    long created;
+                    if (!CloudGen.ReadJob(jobs[i], out id, out image, out sec, out created)) continue;
+                    WallpaperItem it = FindById(id);
+                    string vid = it == null ? "" : VideoFor(it);
+                    if (string.IsNullOrEmpty(vid) || !File.Exists(vid)) continue;
+
+                    CloudGen.RemoveBuddyJob(id);
+                    Log.Note("WorkBuddy 积分通道：到货 " + id + " → " + vid);
+                    if (it == null) continue;
+
+                    bool want = (pendingApplyId == id) || (Config.PendingCloudId == id);
+                    it.Motion = true;
+                    it.Effect = 2;
+                    // 自检里跑收货时不能真去设系统壁纸 / 拉起播放器
+                    if (want && !SelfTestNoPlay)
+                    {
+                        pendingApplyId = null;
+                        if (Config.PendingCloudId == id)
+                        {
+                            Config.PendingCloudId = "";
+                            ConfigStore.Save(Config);
+                        }
+                        try { SetMotionFx(it, 2); }
+                        catch (Exception ex) { Log.Note("!! 到货自动播放失败：" + ex.Message); }
+                    }
+                    if (win != null)
+                    {
+                        win.RefreshList();
+                        win.SetStatus("WorkBuddy 出片已到货：" + it.Title + "（待领工单已收）");
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Note("!! 扫描 WorkBuddy 待领工单失败：" + ex.Message); }
+        }
+
         public void SweepCloudJobs()
         {
+            SweepBuddyJobs();       // 积分通道的收货不依赖 queue\ 是否存在
             try
             {
                 if (!Directory.Exists(CloudGen.QueueDir)) return;

@@ -1290,3 +1290,94 @@ docs/PROGRESS.md              本文件
 `package.bat` / `docs/readme.txt` 升 **v0.9.1**，重新打包
 `dist\WallpaperManager-v0.9.1.zip`。待办不变：远程 URL、`index.json` 里
 新图误写的动效标记、`jobs\done\` 假工单、真 Key 链路，均按权限边界等主人授权。
+
+## 十九、11-15：WorkBuddy 免费模型能不能用于云端生成（v0.9.2）
+
+主人问：「云端生成那里选定模型不能用 WorkBuddy 里配的吗，我看 hy4 和 hy3
+都是免费的」。核查结论：**不能**，且不是少加两个下拉项的问题。
+
+### 1. 依据（官方文档 + 官方公告，2026-11-15 核实）
+
+- `docs.workbuddy.cn/.../Function-Description/Model`「内置模型」表：
+  Hy4 preview = 混元新一代模型，可用功能「√ 图片输入 / √ 思考模式」；
+  Hy3 = 混元思考模型，同样只有图片输入与思考模式。它们是**对话 / 推理模型**，
+  输出文字，不产出视频文件。同页「自定义模型」说明：配置（含 API Key）只保存在
+  本地 `workbuddy/models.json`，WorkBuddy 仅作通信链路转发对话。
+- 官方 Hy4 上线公告补充：①「Hy4 是一个具备视觉理解能力的大语言模型，
+  如果用户有特定生成图片与视频的任务，会切换到相应多模态模型完成，因此会按照
+  正常规则产生积分消耗」；② Hy4 / Hy3 限免到 **2026-11-15 23:59**，免费用户
+  每日赠额度，触及后消耗积分。即「免费」只覆盖对话额度，不覆盖出片。
+- 本程序 `GenApi.cs` 走的是 DashScope `video-synthesis` / Ark
+  `contents/generations/tasks`：**提交图 → 拿 taskId → 轮询 → 下载 mp4**，
+  与 `/chat/completions` 不是同一种协议；`model` 必须是图生视频模型 ID。
+- 独立 exe 无法读取 WorkBuddy 客户端的模型会话额度或凭证，
+  设置面板里的 Key 是主人在阿里云百炼 / 火山方舟自己开通的 Key。
+
+因此**没有**把 hy4/hy3 加进 `GenModels`：加进去只会造成「选了免费、点了没片」的
+假期待，正是主人此前反复反对的假状态。
+
+### 2. 改动：把 WorkBuddy 积分做成**默认出片通道**
+
+主人追加两条：「就是现在云端生成，我想优先消耗 WorkBuddy 里的积分，使用这里的模型
+图生视频」「直接做成完整可用的功能，而不是只给我一个页面和点击之后没有任何反应的按钮」。
+所以把旁路提升为默认通道，按秒付费降级为可选项，一次点击要有真实动作与产物凭据。
+
+- `Models.cs` / `LibraryStore.cs`：新增 `AppConfig.GenChannel`（`buddy` 默认 / `api`），
+  落盘 `genChannel`；老配置缺字段时 Load 回填 `buddy`。
+- `Settings.cs`：加「出片通道」下拉（默认「优先 WorkBuddy 积分」），
+  Save / LoadFrom 双向绑定；醒目说明用 `CloudGen.BuddyNote`。
+- `CloudGen.cs`：
+  - `BuddyDir` = `jobs\buddy\`，与 `queue\` **分开**：queue 是应用直连服务商、
+    后台线程会自己提交的单；buddy 是等 WorkBuddy 会话确认积分后才可能出片的单。
+    分开后「没配 API 绝不写假工单」的既有断言依然成立，也不会被 `RunApiJob` 误提交。
+  - `WriteBuddyJob` / `RemoveBuddyJob` / `BuddyPendingCount`；工单含
+    `channel=workbuddy-credits`、`status=waiting-for-workbuddy`、源图、`out`、秒数、提示词。
+  - `State.BuddyPending`；`StateOf` 有片优先 Ready，其次才判待领，绝不冒充「生成中」。
+  - `BuildBuddyRequest()` 纯函数生成可粘进 WorkBuddy 会话的图生视频指令
+    （源图、目标 `videos\<id>.mp4`、3 秒 / 720P / 无水印 / 镜头静止 / 首尾循环、
+    先报积分等确认、已有同画面片子别重出）。
+- `Program.cs`：
+  - `IsBuddyChannel()`；`StartBuddyGen(it, regen)` 是「云端生成」默认动作：
+    **弹窗告知积分 → 登记待领工单 → 指令进剪贴板 → 角标变「⏳ 等 Buddy 出片」**。
+    三选（是=积分出片 / 否=改用按秒付费 / 取消=什么都不做）；
+    取消与改用付费都不登记工单。只写 `pendingApplyId` 内存标记，不写 config。
+  - `GenCloud` / `RegenCloud` 默认走这条；`GenChannel="api"` 才回到原 `CloudChoose`
+    → `QueueCloudGen` → `GenApi` 直连（含 `AskCloudConfig`），**原付费链路未改**。
+  - `SweepBuddyJobs()` 挂在 `SweepCloudJobs()` 前面：mp4 落进 `videos\` 后自动收掉
+    待领工单、标动态、自动换桌面、刷新角标；自检注入 `SelfTestNoPlay` 时不碰系统壁纸。
+  - `OpenBuddyFolder()`：右键可直接打开待领工单目录（延续「我下单在哪能看到」）。
+- `MainWindow.cs`：`BadgeInfo.BuddyPending` + `ApplyBadge` 显示「⏳ 等 Buddy 出片」；
+  待领时右键改为「重新复制指令」，并加「查看 WorkBuddy 待领工单」。
+  另有手动补充入口「⧉ 复制交给 WorkBuddy 的指令（不填 Key）」。
+
+**边界（必须如实说明）**：桌面 exe 拿不到 WorkBuddy 客户端的模型会话凭证，
+所以不能像填 Key 那样在进程内直接扣积分出片。真正出片由 WorkBuddy 会话执行
+（手动粘贴指令 / 客户端定时自动领单）；程序负责下单登记、状态可见、到货自动收货播放，
+绝不假装在生成，也绝不偷偷扣积分。
+
+### 3. 验证（全绿）
+
+- `build.bat --noboot`：`build.log` / `build-player.log` 均 0 字节。
+- `--buddyhinttest` **43/43 PASS**：除口径断言（限免期限、每日额度、
+  「生成不了 mp4」「不共享额度/Key」「积分」、模型目录不混入 hy4/hy3、指令要素、
+  秒数夹到 3 秒、不含服务商地址/Key）外，真跑默认通道整条链：
+  默认通道判定、设置下拉默认项、点生成弹积分告知、登记待领工单、
+  工单字段、**不写 queue 工单**、指令生成（自检不写系统剪贴板）、
+  状态为 `BuddyPending`、角标文字「⏳ 等 Buddy 出片」、
+  取消/改用付费都不登记工单、造一份到货 mp4 后自动收单并转 Ready。
+- 既有 10 项隔离回归全 PASS：`--searchtest`（静态 4/4、有飘动片 3/3）、
+  `--importexporttest 11/11`、`--proxytest 9/9`、`--videotest 7/7`、
+  `--relatedvideotest 56/56`、`--orphantest 16/16`、
+  `--clouddialogtest 20/20`、`--contenttest 5/5`、`--badgetest 28/28`、
+  `--launchtest 11/11`。
+- 权限边界：外部 `index.json` / `config.json` / `jobs\queue` 快照**差异 0 处**；
+  `D:\Wallpaper` 67 个文件、280,056,115 字节不变；无残留进程；
+  `jobs\buddy` 真实目录保持空（自检全部隔离在仓库内 `.selftest-tmp`）。
+  仍跳过 `--deltest / --greettest / --configtest / --arrivetest`。
+  本回合**没有**调用任何会消耗积分的多模态生成工具，也没有写入系统剪贴板。
+
+### 4. 版本
+
+`package.bat` / `docs/readme.txt` 升 **v0.9.2**，重新打包
+`dist\WallpaperManager-v0.9.2.zip`。待办不变：远程 URL、`index.json` 里
+新图误写的动效标记、`jobs\done\` 假工单、真 Key 链路，均按权限边界等主人授权。

@@ -55,6 +55,10 @@ namespace WallpaperManager
         public string GenModel = "";            // 留空就用该服务商的默认模型
         public string GenResolution = "720P";   // 720P / 1080P
 
+        // 11-15：出片通道。"buddy" = 优先消耗 WorkBuddy 积分（默认，不用填 Key），
+        // "api" = 走服务商 API Key 直连（按秒付费）。老配置没这个字段时 Load 会回填 buddy。
+        public string GenChannel = "buddy";
+
         // ---- 网络（Net.cs）----
         // 空 = 直连（以前的行为）；填 host:port 或 http://host:port 就走代理。
         public string Proxy = "";
