@@ -577,5 +577,247 @@ namespace WallpaperManager
                 string.Equals(Net.Current, savedProxy, StringComparison.Ordinal), Net.Current);
             return Finish(sb, pass, total);
         }
+
+        /// <summary>
+        /// 11-14 主人追问：「点完就显示生成中，还是假的吗？」
+        /// 验：没选服务商 / 没填 Key 时必须弹窗列明白缺什么，且不写工单、不报 Queued、
+        /// 不改动效标记；再验 22:37 那种历史僵尸工单会被判成 Manual 而不是「生成中」。
+        /// 全程隔离到临时目录，真实 config / 队列 / 壁纸库一个字节不碰。
+        /// </summary>
+        public static string CloudConfigGuard(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+            string savedRoot = app.Config.LibRoot;
+            string savedDirOverride = ConfigStore.DirOverride;
+            string savedProvider = app.Config.GenProvider;
+            string savedKey = app.Config.GenApiKey;
+            string savedModel = app.Config.GenModel;
+            string savedPending = app.Config.PendingCloudId;
+            bool savedNoDialogs = App.SelfTestNoDialogs;
+            MessageBoxResult savedAnswer = App.SelfTestCloudAnswer;
+            int dialogsBefore = App.CloudDialogCount;
+            int realJobsBefore = CloudGen.PendingCount();
+
+            string tmp = Path.Combine(Path.GetTempPath(),
+                                      "wallpaper-cfgdlg-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+                string lib = Path.Combine(tmp, "lib");
+                Directory.CreateDirectory(Path.Combine(lib, "images"));
+                Directory.CreateDirectory(Path.Combine(lib, "videos"));
+                Directory.CreateDirectory(Path.Combine(tmp, "cfg"));
+
+                ConfigStore.DirOverride = Path.Combine(tmp, "cfg");
+                app.Config.LibRoot = lib;
+                app.Config.GenProvider = "";
+                app.Config.GenApiKey = "";
+                app.Config.GenModel = "";
+                app.Config.PendingCloudId = "";
+                App.SelfTestNoDialogs = true;
+                App.SelfTestCloudAnswer = MessageBoxResult.No;   // 选「先不生成」，不开设置窗口
+                CloudGen.EnsureDirs();
+
+                WallpaperItem probe = new WallpaperItem();
+                probe.Id = "cfgdlg-guard-01";
+                probe.Title = "假生成中自检";
+                probe.File = "images/" + probe.Id + ".jpg";
+                probe.ImagePath = Path.Combine(lib, "images", probe.Id + ".jpg");
+                File.WriteAllBytes(probe.ImagePath, Encoding.UTF8.GetBytes("probe image"));
+
+                string msg;
+                bool queued = app.QueueCloudGen(probe, probe.ImagePath, out msg);
+                Hit(sb, ref pass, ref total, "没配 API 时拒绝下单", !queued, msg);
+                Hit(sb, ref pass, ref total, "没有写工单",
+                    !File.Exists(CloudGen.JobPath(probe.Id)), "");
+                Hit(sb, ref pass, ref total, "缺信息时确实弹窗提示",
+                    App.CloudDialogCount == dialogsBefore + 1,
+                    "次数 " + dialogsBefore + " → " + App.CloudDialogCount);
+                Hit(sb, ref pass, ref total, "弹窗列明「服务商」",
+                    App.LastCloudDialog.IndexOf("服务商") >= 0, "");
+                Hit(sb, ref pass, ref total, "弹窗列明「API Key」",
+                    App.LastCloudDialog.IndexOf("API Key") >= 0, "");
+                Hit(sb, ref pass, ref total, "弹窗写明两家服务商与单价",
+                    App.LastCloudDialog.IndexOf("通义万相") >= 0
+                    && App.LastCloudDialog.IndexOf("火山方舟") >= 0, "");
+                Hit(sb, ref pass, ref total, "弹窗给出工单目录",
+                    App.LastCloudDialog.IndexOf("工单目录") >= 0, "");
+                Hit(sb, ref pass, ref total, "状态不是「生成中」",
+                    CloudGen.StateOf(app.Config, probe) == CloudGen.State.None,
+                    CloudGen.StateOf(app.Config, probe).ToString());
+                Hit(sb, ref pass, ref total, "动效标记没被偷偷改成动态", !probe.Motion, "");
+                Hit(sb, ref pass, ref total, "状态栏明说没有下单 / 没有扣费",
+                    msg.IndexOf("没有下单") >= 0 && msg.IndexOf("没有扣费") >= 0, msg);
+
+                // 模拟 22:37 那种「没配 API 却留下的僵尸工单」：必须判 Manual，不能冒充生成中。
+                string zombie = CloudGen.JobPath(probe.Id);
+                File.WriteAllText(zombie,
+                    "{\r\n  \"id\": " + Json.Quote(probe.Id) + ",\r\n  \"created\": 1\r\n}\r\n",
+                    new UTF8Encoding(false));
+                Hit(sb, ref pass, ref total, "历史僵尸工单判为 Manual（不冒充生成中）",
+                    CloudGen.StateOf(app.Config, probe) == CloudGen.State.Manual,
+                    CloudGen.StateOf(app.Config, probe).ToString());
+                try { File.Delete(zombie); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                app.Config.LibRoot = savedRoot;
+                app.Config.GenProvider = savedProvider;
+                app.Config.GenApiKey = savedKey;
+                app.Config.GenModel = savedModel;
+                app.Config.PendingCloudId = savedPending;
+                ConfigStore.DirOverride = savedDirOverride;
+                App.SelfTestNoDialogs = savedNoDialogs;
+                App.SelfTestCloudAnswer = savedAnswer;
+                RelatedVideo.Invalidate();
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+            Hit(sb, ref pass, ref total, "真实工单队列数量不变",
+                CloudGen.PendingCount() == realJobsBefore, "队列数=" + realJobsBefore);
+            Hit(sb, ref pass, ref total, "LibRoot / 服务商 / Key 已还原",
+                string.Equals(app.Config.LibRoot, savedRoot, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(app.Config.GenProvider, savedProvider, StringComparison.Ordinal)
+                && string.Equals(app.Config.GenApiKey, savedKey, StringComparison.Ordinal), "");
+            return Finish(sb, pass, total);
+        }
+
+        /// <summary>
+        /// 11-14 主人实测：「video 文件夹下有视频啊，怎么最后一张还要生成？」
+        /// 专测最后一层兜底 —— 没带 id、但名字是云端服务商原始出片（带 UTC 时间戳）的散片，
+        /// 也要被认出来直接用；无关视频 / 同前缀别的 id 不能误认；没有才允许下单。
+        /// 反证：故意配好假 Key 并把端点指到本机模拟服务端，漏一道闸就会真 POST 一次。
+        /// 另外断言「不往库里复制/新建任何文件」—— 这一层纯读，不动主人的壁纸库。
+        /// </summary>
+        public static string OrphanGuard(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+            string savedRoot = app.Config.LibRoot;
+            string savedDirOverride = ConfigStore.DirOverride;
+            string savedProvider = app.Config.GenProvider;
+            string savedKey = app.Config.GenApiKey;
+            string savedPending = app.Config.PendingCloudId;
+            string savedEndpoint = GenApi.EndpointOverride;
+            bool savedNoPlay = App.SelfTestNoPlay;
+            bool savedNoDialogs = App.SelfTestNoDialogs;
+            int realJobsBefore = CloudGen.PendingCount();
+            string realIndex = Path.Combine(savedRoot, "index.json");
+            string realIndexBefore = "";
+            try { if (File.Exists(realIndex)) realIndexBefore = File.ReadAllText(realIndex, Encoding.UTF8); }
+            catch { }
+
+            string tmp = Path.Combine(Path.GetTempPath(),
+                                      "wallpaper-orphan-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            string lib = Path.Combine(tmp, "lib");
+            MockCloudServer mock = new MockCloudServer();
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(lib, "images"));
+                Directory.CreateDirectory(Path.Combine(lib, "videos"));
+                Directory.CreateDirectory(Path.Combine(tmp, "cfg"));
+                string clip = Path.Combine(tmp, "clip.mp4");
+                File.WriteAllBytes(clip, Encoding.UTF8.GetBytes("mock clip for submit counter"));
+                bool started = mock.Start(clip);
+                Hit(sb, ref pass, ref total, "本机模拟服务端启动（零外部流量）", started,
+                    started ? mock.BaseUrl : mock.LastError);
+                if (!started) return Finish(sb, pass, total);
+
+                ConfigStore.DirOverride = Path.Combine(tmp, "cfg");
+                app.Config.LibRoot = lib;
+                app.Config.GenProvider = "wanx";
+                app.Config.GenApiKey = "MOCK-KEY-NO-SPEND";
+                app.Config.PendingCloudId = "";
+                GenApi.EndpointOverride = mock.BaseUrl;
+                App.SelfTestNoPlay = true;
+                App.SelfTestNoDialogs = true;
+                CloudGen.EnsureDirs();
+
+                byte[] sample = Encoding.UTF8.GetBytes("wallpaper-orphan-probe");
+                WallpaperItem probe = new WallpaperItem();
+                probe.Id = "orphan-guard-01";
+                probe.Title = "未归属出片自检";
+                probe.File = "images/" + probe.Id + ".jpg";
+                probe.ImagePath = Path.Combine(lib, "images", probe.Id + ".jpg");
+                File.WriteAllBytes(probe.ImagePath, sample);
+                Put(lib, "images/landscape.jpg", sample);      // 有主的图，别让 KnownKeys 空着
+
+                string orphanRel = "videos/Anime_girl_waving_2026-11-12T10-02-47.mp4";
+                string orphan = Path.Combine(lib, orphanRel);
+                Put(lib, orphanRel, sample);
+                RelatedVideo.Invalidate();
+
+                string canonical = CloudGen.VideoPath(lib, probe.Id);
+                Hit(sb, ref pass, ref total, "没带 id 的原始出片被认出来",
+                    app.HasCloudVideo(probe), "");
+                Hit(sb, ref pass, ref total, "状态机报 Ready（菜单不会再说要生成）",
+                    CloudGen.StateOf(app.Config, probe) == CloudGen.State.Ready, "");
+
+                string m1, m2;
+                bool q = app.QueueCloudGen(probe, probe.ImagePath, out m1);
+                bool e = CloudGen.Enqueue(app.Config, probe, probe.ImagePath, out m2);
+                app.GenCloud(probe);
+                Hit(sb, ref pass, ref total, "三个下单入口全部拒绝", !q && !e, m1);
+                Hit(sb, ref pass, ref total, "没有写工单",
+                    !File.Exists(CloudGen.JobPath(probe.Id)), "");
+                Hit(sb, ref pass, ref total, "模拟服务端零提交（零费用）",
+                    mock.SubmitCount == 0, "提交数=" + mock.SubmitCount);
+                Hit(sb, ref pass, ref total, "纯读：没有复制/新建规范主文件",
+                    !File.Exists(canonical) && File.Exists(orphan), "");
+
+                // 反例：随便一个视频、或同前缀别的 id，不能被误认
+                File.Delete(orphan);
+                Put(lib, "videos/totally-unrelated.mp4", sample);
+                Put(lib, "videos/" + probe.Id + "0.mp4", sample);
+                RelatedVideo.Invalidate();
+                Hit(sb, ref pass, ref total, "无关视频 / 同前缀别的 id 不误认",
+                    !app.HasCloudVideo(probe), "");
+                string m3;
+                bool allow = CloudGen.Enqueue(app.Config, probe, probe.ImagePath, out m3);
+                Hit(sb, ref pass, ref total, "没有任何相关视频时才允许下单",
+                    allow && File.Exists(CloudGen.JobPath(probe.Id)), m3);
+                try { if (File.Exists(CloudGen.JobPath(probe.Id))) File.Delete(CloudGen.JobPath(probe.Id)); }
+                catch { }
+                Hit(sb, ref pass, ref total, "全程模拟服务端零提交",
+                    mock.SubmitCount == 0, "提交数=" + mock.SubmitCount);
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                App.SelfTestNoPlay = savedNoPlay;
+                App.SelfTestNoDialogs = savedNoDialogs;
+                app.Config.LibRoot = savedRoot;
+                app.Config.GenProvider = savedProvider;
+                app.Config.GenApiKey = savedKey;
+                app.Config.PendingCloudId = savedPending;
+                ConfigStore.DirOverride = savedDirOverride;
+                GenApi.EndpointOverride = savedEndpoint;
+                RelatedVideo.Invalidate();
+                try { mock.Stop(); } catch { }
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            string realIndexAfter = "";
+            try { if (File.Exists(realIndex)) realIndexAfter = File.ReadAllText(realIndex, Encoding.UTF8); }
+            catch { }
+            Hit(sb, ref pass, ref total, "真实库 index.json 未被改动",
+                string.Equals(realIndexBefore, realIndexAfter, StringComparison.Ordinal), "");
+            Hit(sb, ref pass, ref total, "真实工单队列数量不变",
+                CloudGen.PendingCount() == realJobsBefore, "队列数=" + realJobsBefore);
+            Hit(sb, ref pass, ref total, "LibRoot / 服务商 / Key / 端点已还原",
+                string.Equals(app.Config.LibRoot, savedRoot, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(app.Config.GenProvider, savedProvider, StringComparison.Ordinal)
+                && string.Equals(app.Config.GenApiKey, savedKey, StringComparison.Ordinal)
+                && string.Equals(GenApi.EndpointOverride, savedEndpoint, StringComparison.Ordinal), "");
+            return Finish(sb, pass, total);
+        }
     }
 }

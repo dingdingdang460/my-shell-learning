@@ -31,7 +31,7 @@ namespace WallpaperManager
         Border cloudToast;
         TextBlock cloudTitle, cloudName, cloudStatus, cloudSub, cloudEstimate;
         ComboBox cloudModelBox;
-        Button cloudMain, cloudSettings;
+        Button cloudMain, cloudSettings, cloudJobs;
         System.Windows.Threading.DispatcherTimer cloudTimer;
         int cloudMode;              // 0=等待中 1=已到货 2=失败 3=下单前确认/选模型
         int cloudSpin, cloudHold;
@@ -487,7 +487,8 @@ namespace WallpaperManager
             cloudSettings.FontSize = 12;
             cloudSettings.Focusable = false;
             cloudSettings.Background = new SolidColorBrush(Color.FromRgb(36, 38, 46));
-            cloudSettings.ToolTip = "打开设置，切换服务商 / 模型 / 分辨率并填 API Key";
+            cloudSettings.ToolTip = "打开设置，切换服务商 / 模型 / 分辨率并填 API Key"
+                                 + "；工单是纯文本 JSON，放在 " + CloudGen.QueueDir;
             cloudSettings.Click += delegate
             {
                 if (cloudMode == 3)      // 确认态：这个按钮是「取消」
@@ -502,8 +503,20 @@ namespace WallpaperManager
                 app.OpenSettings();
             };
 
+            // 11-14 主人问「我下单在哪能看到？」：以前工单只有磁盘上的 JSON，界面完全看不见。
+            // 给一个按钮直接打开目录并选中当前这单，纯文本，主人自己能看、能改、能删。
+            cloudJobs = MakeButton("查看工单");
+            cloudJobs.Padding = new Thickness(11, 4, 11, 4);
+            cloudJobs.FontSize = 12;
+            cloudJobs.Focusable = false;
+            cloudJobs.Background = new SolidColorBrush(Color.FromRgb(36, 38, 46));
+            cloudJobs.ToolTip = "打开工单目录并选中这张单；工单是纯文本 JSON，可自己看 / 改 / 删";
+            cloudJobs.Visibility = Visibility.Collapsed;
+            cloudJobs.Click += delegate { if (app != null) app.OpenJobFolder(cloudId); };
+
             cbtns.Children.Add(cloudMain);
             cbtns.Children.Add(cloudSettings);
+            cbtns.Children.Add(cloudJobs);
             cbox.Children.Add(cbtns);
 
             cloudToast = new Border();
@@ -2276,6 +2289,7 @@ namespace WallpaperManager
             cloudMain.Visibility = Visibility.Visible;
             cloudSettings.Content = "取消";
             cloudSettings.Visibility = Visibility.Visible;
+            cloudJobs.Visibility = Visibility.Collapsed;
             cloudToast.Visibility = Visibility.Visible;
             UpdateCloudChoiceEstimate();
         }
@@ -2324,8 +2338,39 @@ namespace WallpaperManager
             cloudSettings.Content = "怎么生成？";
             cloudMain.Visibility = Visibility.Visible;
             cloudSettings.Visibility = Visibility.Visible;
+            cloudJobs.Visibility = Visibility.Visible;
             cloudToast.Visibility = Visibility.Visible;
             UpdateCloudToast();
+            StartCloudTimer();
+        }
+
+        /// <summary>
+        /// 11-14：队列里躺着一张「没配 API、没有进程会提交」的工单。
+        /// 以前 StateOf 一律报 Queued → 界面写「生成中」，主人一眼看穿是假的。
+        /// 现在明说「待人工处理」，并把工单 JSON 摆到眼前，让主人自己决定删掉还是补 Key。
+        /// </summary>
+        public void CloudManual(string id, string title)
+        {
+            cloudId = id == null ? "" : id;
+            cloudMode = 4;
+            cloudHold = 0;
+            cloudTitle.Text = "⏸ 云端生成 · 待人工处理";
+            cloudTitle.Foreground = new SolidColorBrush(Color.FromRgb(236, 196, 130));
+            cloudToast.BorderBrush = new SolidColorBrush(Color.FromRgb(168, 132, 68));
+            cloudName.Text = DisplayTitle(title);
+            cloudStatus.Foreground = new SolidColorBrush(Color.FromRgb(236, 196, 130));
+            cloudStatus.Text = "× 这单不会自动出片：还没选服务商 / 没填 API Key";
+            cloudSub.Text = "点「查看工单」打开 JSON（可直接删掉）；或点「怎么生成？」填好服务商和 Key。"
+                          + "\r\n已经有片子就直接放进 videos\\，程序会自动认出来，不用重新生成。\r\n"
+                          + "工单目录：" + CloudGen.QueueDir;
+            cloudModelBox.Visibility = Visibility.Collapsed;
+            cloudEstimate.Visibility = Visibility.Collapsed;
+            cloudMain.Content = "取消这单";
+            cloudSettings.Content = "怎么生成？";
+            cloudMain.Visibility = Visibility.Visible;
+            cloudSettings.Visibility = Visibility.Visible;
+            cloudJobs.Visibility = Visibility.Visible;
+            cloudToast.Visibility = Visibility.Visible;
             StartCloudTimer();
         }
 
@@ -2347,6 +2392,7 @@ namespace WallpaperManager
             cloudMain.Content = "知道了";
             cloudMain.Visibility = Visibility.Visible;
             cloudSettings.Visibility = Visibility.Collapsed;
+            cloudJobs.Visibility = Visibility.Collapsed;
             cloudToast.Visibility = Visibility.Visible;
             StartCloudTimer();
         }
@@ -2370,6 +2416,7 @@ namespace WallpaperManager
             cloudMain.Content = "重试";
             cloudMain.Visibility = Visibility.Visible;
             cloudSettings.Visibility = Visibility.Visible;
+            cloudJobs.Visibility = Visibility.Visible;
             cloudToast.Visibility = Visibility.Visible;
             StartCloudTimer();
         }
@@ -2392,7 +2439,8 @@ namespace WallpaperManager
             if (cloudToast == null || cloudToast.Visibility != Visibility.Visible) return;
 
             // 确认态等主人自己决定，不自动收起、也不每秒重画（下拉会被刷新打断）
-            if (cloudMode == 3) return;
+            // mode=4（待人工处理）同理：文案不能被倒计时刷掉，也不该 8 秒就消失。
+            if (cloudMode == 3 || cloudMode == 4) return;
 
             if (cloudMode != 0)
             {
@@ -2454,7 +2502,7 @@ namespace WallpaperManager
                 if (app != null) app.RetryCloud(id);
                 return;
             }
-            if (cloudMode == 0)
+            if (cloudMode == 0 || cloudMode == 4)
             {
                 HideCloudToast();
                 if (app != null) app.CancelCloud(id);
@@ -2549,6 +2597,7 @@ namespace WallpaperManager
                 CloudGen.State st = CloudGen.StateOf(app.Config, it);
                 if (st == CloudGen.State.Ready) meta += " · 已配飘动视频，可播";
                 else if (st == CloudGen.State.Queued) meta += " · 云端生成中，好了会自动换上";
+                else if (st == CloudGen.State.Manual) meta += " · 有一张不会自动出片的旧工单（可查看/删除）";
                 else if (st == CloudGen.State.Failed) meta += " · 上次生成失败了，可以重试";
             }
 
@@ -2827,9 +2876,11 @@ namespace WallpaperManager
             bool hasVid = app.HasCloudVideo(it);
             bool playing = app.Config.DynamicEnabled && app.Config.LastDynamicId == it.Id;
             // 排队中也得看得见：不然点完「飘动视频」这张卡片跟没点一样
-            bool queued = !hasVid && !it.IsVideo
-                          && CloudGen.StateOf(app.Config, it) == CloudGen.State.Queued;
-            if (hasVid || playing || queued)
+            CloudGen.State cardState = CloudGen.StateOf(app.Config, it);
+            bool queued = !hasVid && !it.IsVideo && cardState == CloudGen.State.Queued;
+            // 11-14：没配 API 的工单绝不打「生成中」角标，那是假状态。
+            bool manual = !hasVid && !it.IsVideo && cardState == CloudGen.State.Manual;
+            if (hasVid || playing || queued || manual)
             {
                 Border badge = new Border();
                 badge.CornerRadius = new CornerRadius(0, 8, 8, 0);
@@ -2841,13 +2892,18 @@ namespace WallpaperManager
                     ? new SolidColorBrush(Color.FromArgb(228, 46, 92, 168))
                     : queued
                         ? new SolidColorBrush(Color.FromArgb(220, 40, 78, 84))
-                        : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
+                        : manual
+                            ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
+                            : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
 
                 TextBlock bt = new TextBlock();
-                bt.Text = playing ? "▶ 播放中" : (queued ? "☁ 生成中" : "✦ 飘动");
+                bt.Text = playing ? "▶ 播放中"
+                        : queued ? "☁ 生成中"
+                        : manual ? "⏸ 待处理" : "✦ 飘动";
                 bt.FontSize = 10.5;
                 bt.Foreground = playing ? Brushes.White
                                         : queued ? new SolidColorBrush(Color.FromRgb(168, 232, 226))
+                                        : manual ? new SolidColorBrush(Color.FromRgb(240, 206, 146))
                                                  : new SolidColorBrush(Color.FromRgb(228, 217, 255));
                 badge.Child = bt;
                 g.Children.Add(badge);
@@ -2981,6 +3037,12 @@ namespace WallpaperManager
                     mCloud.IsCheckable = true;
                     mCloud.IsChecked = it.Motion && it.Effect == 2;
                     mCloud.Click += delegate { app.SetMotionFx(it, 2); };
+                }
+                else if (cs == CloudGen.State.Manual)
+                {
+                    // 11-14：旧工单不会自动出片，别再让人点一次「生成」掉进假状态。
+                    mCloud.Header = "云端生成：有一张不会自动出片的旧工单（点此查看）";
+                    mCloud.Click += delegate { app.OpenJobFolder(it.Id); };
                 }
                 else
                 {

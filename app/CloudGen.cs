@@ -209,16 +209,23 @@ namespace WallpaperManager
             return true;
         }
 
-        public enum State { None, Queued, Ready, Failed }
+        /// <summary>
+        /// Manual = 队列里躺着一张工单，但没配 API，根本不会有进程去提交它。
+        /// 11-14 主人实测：「点完就显示生成中，还是假的」。以前 StateOf 一律报 Queued，
+        /// 界面就跟着写「生成中」，实际那张 JSON 要挂两天才超时。现在单独分出来，
+        /// 界面必须写「待人工处理」，绝不冒充正在生成。
+        /// </summary>
+        public enum State { None, Queued, Ready, Failed, Manual }
 
         public static State StateOf(AppConfig cfg, WallpaperItem it)
         {
             if (it == null || string.IsNullOrEmpty(it.Id)) return State.None;
             if (File.Exists(VideoPath(cfg.LibRoot, it.Id))) return State.Ready;
-            // 11-14：备份 / 变体命名 / 关联子文件夹里的片子也算「已就绪」，
+            // 11-14：备份 / 变体命名 / 关联子文件夹 / 没带 id 的散片，都算「已就绪」，
             // 界面菜单才不会把「播放这段视频」错写成「云端生成（要花钱）」。
             if (!it.IsVideo && RelatedVideo.Find(cfg.LibRoot, it, null) != null) return State.Ready;
-            if (File.Exists(JobPath(it.Id))) return State.Queued;
+            if (File.Exists(JobPath(it.Id)))
+                return GenApi.Ready(cfg) ? State.Queued : State.Manual;
             if (File.Exists(Path.Combine(FailDir, it.Id + ".json"))) return State.Failed;
             return State.None;
         }

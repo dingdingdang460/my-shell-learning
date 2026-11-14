@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -167,7 +169,9 @@ namespace WallpaperManager
                     || s.Equals("--importexporttest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--proxytest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--videotest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--relatedvideotest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--relatedvideotest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--orphantest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--clouddialogtest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -633,6 +637,50 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --relatedvideotest：\r\n" + detail);
                         Log.Note("自检 --relatedvideotest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--orphantest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14：主人「video 文件夹下有视频啊，怎么还要生成」——
+                    // 专测没带 id 的云端原始出片也能被复用，且纯读不往库里写文件。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.OrphanGuard(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --orphantest：\r\n" + detail);
+                        Log.Note("自检 --orphantest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--clouddialogtest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14：主人「点完就一个生成中，还是假的」——
+                    // 验没配 API 时必须弹窗说清缺什么，且不写工单、不报 Queued。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.CloudConfigGuard(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --clouddialogtest：\r\n" + detail);
+                        Log.Note("自检 --clouddialogtest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -1748,6 +1796,76 @@ namespace WallpaperManager
         internal static bool SelfTestNoPlay = false;
 
         /// <summary>
+        /// 11-14：没配好服务商 / API Key 时，把缺的东西一次说清，并直接带去设置。
+        ///
+        /// 老行为是照样写一张工单、把界面切成「生成中」，可没有任何进程会去提交它 ——
+        /// 主人原话：「就一个生产中还是假的」。现在所有下单入口都先过这里：
+        /// 不写工单、不改状态、不显示生成中，也不会向任何服务商发请求、不会扣费。
+        /// 自检用 SelfTestNoDialogs / SelfTestCloudAnswer 注入，不弹真窗口。
+        /// </summary>
+        internal static bool SelfTestNoDialogs = false;
+        internal static MessageBoxResult SelfTestCloudAnswer = MessageBoxResult.No;
+        internal static string LastCloudDialog = "";
+        internal static int CloudDialogCount = 0;
+
+        bool AskCloudConfig(WallpaperItem it, out string msg)
+        {
+            GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
+            StringBuilder miss = new StringBuilder();
+            if (p == GenApi.Provider.None)
+                miss.Append("  · 服务商：还没选（可选 通义万相 DashScope / 火山方舟 Ark）\r\n");
+            if (string.IsNullOrEmpty(Config.GenApiKey))
+                miss.Append("  · API Key：还没填\r\n");
+            if (string.IsNullOrEmpty(Config.GenModel))
+                miss.Append("  · 模型：还没选（选好服务商会自动带出默认模型）\r\n");
+
+            string body = "这张还没有飘动视频。自动出片需要先配好：\r\n\r\n"
+                + miss.ToString() + "\r\n"
+                + "现在不会向任何服务商发请求，也不会扣费。\r\n"
+                + "可选两家：通义万相 wan2.6-i2v-flash（720P 约 ¥0.15/秒）、"
+                + "火山方舟 Doubao-Seedance（约 ¥0.2~0.6/秒）。\r\n\r\n"
+                + "点「是」打开设置填好服务商和 API Key；点「否」先不生成。\r\n"
+                + "已经有片子的话，把 mp4 改名成 " + it.Id + ".mp4 放进 videos\\ 就会自动识别并播放。\r\n\r\n"
+                + "工单目录：" + CloudGen.QueueDir;
+
+            LastCloudDialog = body;
+            CloudDialogCount++;
+            Log.Note("云端生成：配置不全，已弹窗说明（服务商=" + Config.GenProvider
+                     + "，Key=" + (string.IsNullOrEmpty(Config.GenApiKey) ? "空" : "已填")
+                     + "），未下单、未扣费");
+
+            MessageBoxResult r = SelfTestNoDialogs
+                ? SelfTestCloudAnswer
+                : MessageBox.Show(body, "壁纸管家 · 云端生成还没配好",
+                                  MessageBoxButton.YesNo, MessageBoxImage.Information);
+
+            msg = "云端生成还没配好（没选服务商 / 没填 API Key）：没有下单、没有扣费，"
+                + "也不会自动出片。去「设置 → 云端生成」填好即可。";
+            if (r == MessageBoxResult.Yes) OpenSettings();
+            return r == MessageBoxResult.Yes;
+        }
+
+        /// <summary>「我下单在哪能看到？」—— 直接打开工单目录并选中这张单。</summary>
+        public void OpenJobFolder(string id)
+        {
+            try
+            {
+                string dir = CloudGen.QueueDir;
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                string job = string.IsNullOrEmpty(id) ? "" : CloudGen.JobPath(id);
+                string arg = File.Exists(job) ? "/select,\"" + job + "\"" : "\"" + dir + "\"";
+                Process.Start("explorer.exe", arg);
+                if (win != null) win.SetStatus("工单目录：" + dir
+                    + (File.Exists(job) ? "（已选中 " + Path.GetFileName(job) + "）" : ""));
+                Log.Note("云端生成：打开工单目录 " + dir + " id=" + id);
+            }
+            catch (Exception ex)
+            {
+                if (win != null) win.SetStatus("打不开工单目录：" + ex.Message);
+            }
+        }
+
+        /// <summary>
         /// 统一的「已有相关视频」处理：记日志、状态栏说清楚、直接播，绝不进下单流程。
         /// 所有能走到花钱那一步的入口（GenCloud / StartCloud / QueueCloudGen /
         /// SetMotionFx / CloudGen.Enqueue）都先过这道闸。
@@ -1802,8 +1920,10 @@ namespace WallpaperManager
                      + " · " + Config.GenResolution + "（用你的 Key 直连提交）";
             }
             if (p == GenApi.Provider.None)
-                return "未配置云端模型：还没选服务商（去设置选通义万相 / 火山方舟）";
-            return "未配置云端模型：" + GenApi.ProviderName(p) + " 还没填 API Key（去设置填好即可出片）";
+                return "未配置云端模型：还没选服务商（去设置选通义万相 / 火山方舟）"
+                     + "｜工单目录 " + CloudGen.QueueDir;
+            return "未配置云端模型：" + GenApi.ProviderName(p) + " 还没填 API Key（去设置填好即可出片）"
+                 + "｜工单目录 " + CloudGen.QueueDir;
         }
 
         /// <summary>后台线程上报当前阶段；浮条每秒读它，主人才能分清「排队中」还是「生成中」</summary>
@@ -2247,6 +2367,17 @@ namespace WallpaperManager
                 return false;
             }
 
+            // 11-14：没配好 API 就不许写工单、不许显示「生成中」。
+            // 这是总闸 —— 卡片「动态播放」、右键菜单、确认浮条、重试、后台调用全都会到这儿。
+            // 老逻辑在这里无条件写 JSON，可 GenApi.Ready=false 时没有任何线程会处理它，
+            // 界面却切成「☁ 生成中」，主人以为在跑、其实要挂两天才超时。
+            if (!GenApi.Ready(Config))
+            {
+                AskCloudConfig(it, out msg);
+                if (win != null) win.SetStatus(msg);
+                return false;
+            }
+
             if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
                 imagePath = LocalImageFor(it);
 
@@ -2260,6 +2391,7 @@ namespace WallpaperManager
                     // 让人看见「排了多久、靠谁生成」；上次失败则给重试入口。
                     CloudGen.State st = CloudGen.StateOf(Config, it);
                     if (st == CloudGen.State.Queued) win.CloudQueued(it.Id);
+                    else if (st == CloudGen.State.Manual) win.CloudManual(it.Id, it.Title);
                     else if (st == CloudGen.State.Failed) win.CloudFailed(it.Id, it.Title, "上次没出片");
                 }
                 return false;
@@ -2294,7 +2426,8 @@ namespace WallpaperManager
                 int s2 = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
                        ? Config.GenSeconds : CloudGen.MaxSeconds;
                 win.SetStatus(msg + " · " + mm.Id + " · "
-                    + GenModels.CostText(mm, Config.GenResolution, s2) + " · " + CloudChannel());
+                    + GenModels.CostText(mm, Config.GenResolution, s2) + " · " + CloudChannel()
+                    + " · 工单：" + CloudGen.JobPath(it.Id));   // 主人要能自己找到这单
                 win.CloudQueued(it.Id);      // 点了就得看得见：阶段、已等、预计剩余、费用
                 win.RefreshList();
             }
@@ -2425,11 +2558,15 @@ namespace WallpaperManager
                     string vid = CloudGen.VideoPath(Config.LibRoot, id);
                     if (!File.Exists(vid))
                     {
-                        // 11-14：片子落在别的名字 / _raw 之类的子文件夹时也算是到货，
-                        // VideoFor 会把它归一到规范路径，工单不用白挂着等超时。
+                        // 11-14：片子落在别的名字 / _raw / 没带 id 的原始出片，都算到货。
+                        // VideoFor 返回的就是能播的那份（有的层不复制归一），工单不用白挂着等超时。
+                        // 老代码这里又把 vid 赋回规范路径，等于什么都没做 —— 已修。
                         WallpaperItem pending = FindById(id);
-                        if (pending != null && VideoFor(pending) != null)
-                            vid = CloudGen.VideoPath(Config.LibRoot, id);
+                        if (pending != null)
+                        {
+                            string found = VideoFor(pending);
+                            if (!string.IsNullOrEmpty(found)) vid = found;
+                        }
                     }
                     if (File.Exists(vid))
                     {

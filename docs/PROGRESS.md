@@ -1054,3 +1054,85 @@ docs/PROGRESS.md              本文件
 `app/SelfTestExtra.cs`（RelatedVideoGuard + 复用 VideoRecovery 的缓存失效）、
 `build.bat`（编译列表）、`docs/readme.txt`、`docs/PROGRESS.md`、`package.bat`。
 按主人确认的标准流程整体纳入版本控制并编译自检通过后提交。
+
+---
+
+## 十六、11-14 晚：假「生成中」、工单不可见、没带 id 的散片（v0.8）
+
+主人连续三问：「video 文件夹下有视频啊，怎么最后一张还要生成？」「生成功能也还不行吗？
+点完就显示生成中，用的谁家 api？缺信息该弹窗提示啊，就一个生产中还是假的」
+「我下单在哪能看到？还是就你现在能看到？」
+
+### 1. 现场诊断（只读日志 / 文件 / 配置）
+
+- 22:36:19 v0.7 确实从 `.bak-v2` 恢复了 `biliart-17714251-4.mp4`，播放器解码成功
+  （1600x900 / 29fps）；22:36:51 主人手动关掉动态播放 → `motion=false, fx=2`。
+- 22:37 左右 `videos\` 目录被改动：主文件和两个 `.bak` **全部消失**。
+- 22:37:35 主人点生成 → `VideoFor` 按名字找不到任何相关片 → 四道闸全部放行，
+  **真下了一单** `jobs\queue\biliart-17714251-4.json`（至今还挂着）。
+- 主人看到的「文件夹里有视频」是 3 个 `Anime_illustration_of_a_girl_w_*.mp4` /
+  `Anime_girl_with_short_dark_bob_*.mp4` —— 云端服务商原始出片文件名，没带 id，
+  旧规则明确把它们列为「认不出的边界」。
+- `config.json`：`genProvider="" / genApiKey="" / genModel=""`。
+  两家可选（通义万相 DashScope `wan2.6-i2v-flash` 约 ¥0.15/秒、
+  火山方舟 Ark `Doubao-Seedance` 约 ¥0.2~0.6/秒）**一家都没用**，
+  22:37:35 后没有任何 HTTP 提交记录，**没扣过钱**。
+- 「生成中」是假状态：`QueueCloudGen` 无条件写工单，只有 `GenApi.Ready()` 为真
+  才起 `RunApiJob`；没配好时工单要挂 2 天超时，界面却显示「☁ 生成中」。
+  卡片「动态播放」走 `SetMotionFx` 直接调 `QueueCloudGen`，绕过了会提示「去设置」的浮条。
+- 工单界面上完全看不到，只有磁盘上的 JSON；界面没有查看入口。
+
+### 2. 修复
+
+1. **消灭假状态**：`App.AskCloudConfig()` 在 `QueueCloudGen` 总闸处检查
+   `GenApi.Ready(Config)`，没配好就弹窗列明缺什么（服务商 / Key / 模型、两家单价、
+   工单目录），给「去设置」；**不写工单、不改动效标记、不报 Queued、不扣费**。
+   自检用 `SelfTestNoDialogs` / `SelfTestCloudAnswer` 注入。
+2. **历史僵尸单不再冒充生成中**：`CloudGen.State` 新增 `Manual`；
+   `StateOf` 在没配 API 时返回它。卡片角标改「⏸ 待处理」、菜单改「有一张不会自动出片
+   的旧工单（点此查看）」，新增 `MainWindow.CloudManual()` 浮条，明确写明不会自动出片。
+3. **工单可见**：浮条新增「查看工单」按钮 → `App.OpenJobFolder()` 用资源管理器打开
+   目录并选中当前 json；下单后状态栏直接给出工单完整路径；`CloudChannel()` 带工单目录；
+   「怎么生成？」ToolTip 也写了路径。
+4. **没带 id 的原始出片也能复用**：`RelatedVideo` 加第 7 层 `FromOrphans()` ——
+   只认名字带 UTC 时间戳、且不匹配任何已知 id（历史工单 id + 库内图片 stem）的散片，
+   按该图下单时间就近配对、配不上取最近出的一片，进程内一份只归一张图。
+   **纯读**：直接返回原路径播放，不复制、不改名、不往壁纸库写文件，日志写明来路。
+   `zz-` 前缀（项目自检假条目）跳过这一层，避免 `--arrivetest` / `--cloudflowtest`
+   被真实库散片误拦。反例照样不误认：无关 mp4、同前缀别的 id 都不算。
+5. 顺手修 `SweepCloudJobs`：以前 `VideoFor` 找到别处片子后又把 `vid` 赋回规范路径，
+   等于什么都没做；现在直接用 `VideoFor` 返回的路径判到货。
+6. 界面刷新每秒问好几次，推断关联的日志改成只在第一次认领时写一行，不刷屏。
+
+### 3. 自检与回归（全绿）
+
+新增 `--clouddialogtest` **13/13 PASS**（弹窗内容、零工单、`State.None`、
+动效标记不变、僵尸单判 `Manual`、真实队列数不变）；
+新增 `--orphantest` **13/13 PASS**（散片认出 → 三个下单入口全拒绝 → `SubmitCount=0`
+→ 纯读不写盘 → 两条反例不误认 → 无片才允许下单 → 真实 index.json 逐字节未变）；
+`--relatedvideotest 56/56`、`--videotest 7/7`、`--importexporttest 11/11`、
+`--proxytest 9/9`、`--searchtest`（有飘动片 3/3）、`--greettest 19/19`、
+`--deltest`、`--configtest`、`--cloudcfgtest`、`--cloudflowtest`、`--menutest`、
+`--genapicheck`、`--uitest`、`--settingstest bottom` 全 PASS。
+`build.bat --noboot` 两个编译日志均 0 字节。
+`--arrivetest` 本轮**跳过**：它会在真实壁纸库造 `zz-` 测试图片/视频，按权限边界不跑。
+真实库最后一张已经在日志里被认出来并关联到
+`videos\Anime_illustration_of_a_girl_w_2026-11-12T10-02-47.mp4`。
+
+### 4. 权限边界事件（如实记录）
+
+本轮用 `TEMP` / `TMP` 重定向到仓库内 `.selftest-tmp\`（已加进 `.gitignore`），
+让日志与临时文件全落在工作空间内。但 `--deltest` / `--greettest` / `--configtest`
+仍会走真实库：快照对比显示 `D:\Wallpaper\index.json`、`index.json.bak`、
+`%APPDATA%\wallpaper\config.json`、`greetings-auto.json` 共 4 个文件的 **mtime 被重写**
+（22:58:13）。内容已核验全部还原：index 仍 19 条、无 `zz-` 残留、
+`index.json.bak` 与 `index.json` 内容一致、真 Key 仍为空、队列文件未被删改。
+**以后这三个自检要么进一步隔离、要么跑之前先问主人**，不能默认跑。
+
+### 5. 版本与待办
+
+`package.bat` / `docs/readme.txt` 升 **v0.8** 并重新打包。
+`22:37:35` 那张僵尸工单仍在
+`%APPDATA%\wallpaper\jobs\queue\biliart-17714251-4.json`，**按权限边界没有擅自删除**，
+需主人授权；现在 `StateOf` 判 `Ready`，界面不会再显示「生成中」，也不会被提交。
+远程仓库 URL 仍缺，未 push；真 Key 链路未碰。

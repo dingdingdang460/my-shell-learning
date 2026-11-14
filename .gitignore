@@ -43,3 +43,6 @@ config.json
 
 # --- WorkBuddy 本地会话数据（保留在本机，不删除、不上传）---
 .workbuddy/
+
+# --- 自检隔离临时目录：TEMP/TMP 重定向到这里，跑自检不碰仓库外文件 ---
+.selftest-tmp/
