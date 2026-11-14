@@ -1226,3 +1226,67 @@ docs/PROGRESS.md              本文件
 现在程序已按内容判定不播错片，界面也会提示「标了动态但没找到片子」并给
 「改回静态壁纸」按钮；要我把这条索引标记清成静态，说一声即可。
 远程仓库 URL 仍缺，未 push；真 Key 链路未碰。
+
+## 十八、v0.9.1：切换壁纸后「▶ 播放中」不再定格（11-15 凌晨）
+
+主人反馈：「怎么我切换了壁纸，上一个壁纸的动态视频还显示播放中？」
+
+### 1. 根因（三处叠加）
+
+- `MainWindow.BuildCard` 把 `playing = DynamicEnabled && LastDynamicId == it.Id`
+  **在建卡时算一次就写死**。切换壁纸只调 `SetCurrent()`（改边框和状态栏），
+  从不 `RefreshList()`，于是旧卡片上的「▶ 播放中」一直定格到下次重建列表。
+- `DynamicEnabled` / `LastDynamicId` / `cursor` / 角标 / 托盘各写各的：
+  `DoSet` 只把总闸置 false、**不清 `LastDynamicId`**；`StartDynamic` 失败分支
+  只弹一句状态栏，播放器、总闸、旧 id 全都不动 —— 切到一张播不了的新图时，
+  桌面继续放上一张的视频、界面继续写上一张「播放中」。
+- `Dynamic.Launch` 的交接模式在**新窗口没上屏**时也 `return true`，
+  上层照样写「正在播新图」的假状态。
+
+### 2. 修复
+
+- `App` 新增唯一收口 `MarkPlaying(it)` / `MarkStopped()` / `IsPlaying(it, alive)`
+  / `IsPlayingNow()` / `PlayingNow()` / `StopPlayback()`。
+  `MarkStopped` 同时关总闸 + **清空 `LastDynamicId`**（以前留着旧 id，
+  看门狗或下次启动一旦开闸就把旧片拉回来）。所有路径改走收口：
+  `StartDynamic` 成功/失败、`StopDynamic`、`ToggleMotion(false)`、
+  `ApplyItem(allowMotion=false)`、`DoSet` 成功/失败、`DeleteItem`、
+  看门狗连续 5 次重启失败。启动失败现在会 `StopPlayback()` + 清状态 +
+  明确提示「已停掉上一张的视频」，设壁纸失败也兜底收播放器。
+- `App.SelfTestNoPlayerOps` / `SelfTestAliveOverride` 只给隔离自检注入，
+  生产行为不变。
+- `MainWindow`：每张卡**常驻**创建状态角标（默认隐藏）并登记到
+  `stateBadges`；`BadgeInfo` 缓存 hasVid / queued / manual（这些只在
+  `RefreshList` 里变）；新增 `RefreshBadges()` 只重算文字/颜色/可见性，
+  不重建卡片、不解码图片、不碰磁盘。`RefreshList` / `SetCurrent` /
+  `MarkPlaying` / `MarkStopped` 都触发刷新；`WatchdogTick` 每 4 秒再对一次齐。
+  `playing` 判定加一道**播放器进程必须真活着**的保险：配置残留但进程已死，
+  绝不显示假的「播放中」。托盘菜单与悬浮提示同样改用 `IsPlayingNow()`。
+- `Dynamic.Launch`：窗口 2.5 秒内没上屏就如实 `return false` + 明确 err，
+  顺手收掉空壳进程；窗口检查与旧播放器的交接顺序不变。
+
+### 3. 验证（全绿）
+
+- `build.bat --noboot`：`build.log` / `build-player.log` 均 0 字节。
+- 新增 `--badgetest` **28/28 PASS**：全隔离复现「开播 A → 切静态 →
+  切到 C 开播 → 新片启动失败 → 配置残留但进程已死 → 进程回来角标恢复」，
+  逐项断言角标文字、`DynamicEnabled`、`LastDynamicId`、状态栏、托盘文案。
+- 新增 `--launchtest` **11/11 PASS**：真跑一次播放器（只读库里一个 mp4
+  试播约 1 秒），确认窗口正常上屏时 `Start` 仍返回成功、进程/窗口都在、
+  `Stop` 后 `IsPlayingNow` 立刻变假、无残留进程。配置隔离到仓库内临时目录，
+  不设系统壁纸、不改真实 config。
+- 既有隔离回归全部 PASS：`--searchtest`（静态 4/4、有飘动片 3/3）、
+  `--importexporttest 11/11`、`--proxytest 9/9`、`--videotest 7/7`、
+  `--relatedvideotest 56/56`、`--orphantest 16/16`、
+  `--clouddialogtest 20/20`、`--contenttest 5/5`。
+- 权限边界：`D:\Wallpaper\index.json`、`%APPDATA%\wallpaper\config.json`、
+  `jobs\queue` 前后快照**差异 0 处**；`D:\Wallpaper` 67 个文件、
+  280,056,115 字节不变；`videos\` 无任何新写入；跑完无残留播放器/管理器进程。
+  按既有约定仍跳过 `--deltest / --greettest / --configtest / --arrivetest`。
+  自检按程序既有行为追加 `%TEMP%\wallpaper-debug.log` 运行日志。
+
+### 4. 版本
+
+`package.bat` / `docs/readme.txt` 升 **v0.9.1**，重新打包
+`dist\WallpaperManager-v0.9.1.zip`。待办不变：远程 URL、`index.json` 里
+新图误写的动效标记、`jobs\done\` 假工单、真 Key 链路，均按权限边界等主人授权。

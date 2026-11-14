@@ -25,6 +25,21 @@ namespace WallpaperManager
         string filter = "";
         WallpaperItem currentItem;
 
+        // 11-14 深夜：角标以前只在建卡时算一次，切换壁纸后旧卡的「▶ 播放中」
+        // 会一直定格在屏幕上。现在每张卡常驻一个角标控件，状态一变只重算
+        // 文字/颜色，不重建卡片、不重新解码图片（整列表刷新会闪一下）。
+        readonly List<Border> stateBadges = new List<Border>();
+
+        /// <summary>建卡时缓存下来的静态状态。这些只有 RefreshList 才会变，
+        /// 高频的 RefreshBadges 不去碰磁盘，也不会重复跑画面指纹。</summary>
+        class BadgeInfo
+        {
+            public WallpaperItem Item;
+            public bool HasVideo;
+            public bool Queued;
+            public bool Manual;
+        }
+
         // ---- 云端任务浮条 ----
         // 主人 11-13 的要求：「点击云端生成后能看到效果：要选模型还是等待中、等多久、花多少钱」。
         // 所以浮条多一个状态：3 = 下单前确认（选模型 + 看费用/等待），确认后才是 0 = 等待中。
@@ -801,6 +816,7 @@ namespace WallpaperManager
         {
             cards.Children.Clear();
             titleLabels.Clear();
+            stateBadges.Clear();        // 旧角标随旧卡片一起作废，别留悬空引用
 
             UpdateBackBar();
             UpdateChips();
@@ -809,6 +825,7 @@ namespace WallpaperManager
 
             UpdateStatusRight();
             if (!showingOnline) HighlightCurrent();
+            RefreshBadges();            // 全量重建后按真实状态把角标点亮
         }
 
         /// <summary>在线结果返回条的显隐与文案：只要在看网上的东西就亮出来</summary>
@@ -2881,42 +2898,31 @@ namespace WallpaperManager
 
             g.Children.Add(imgHost);
 
-            // 左上角状态角标：一眼看出这张是「已经有飘动视频」还是「正铺在桌面上」
-            bool hasVid = app.HasCloudVideo(it);
-            bool playing = app.Config.DynamicEnabled && app.Config.LastDynamicId == it.Id;
-            // 排队中也得看得见：不然点完「飘动视频」这张卡片跟没点一样
+            // 左上角状态角标：一眼看出这张是「已经有飘动视频」还是「正铺在桌面上」。
+            // v0.9.1：常驻创建、默认隐藏；文字/颜色由 RefreshBadges 统一重算，
+            // 切换壁纸时只改这几个字，旧卡不会再挂着上一张的「播放中」。
+            BadgeInfo info = new BadgeInfo();
+            info.Item = it;
+            info.HasVideo = app.HasCloudVideo(it);
             CloudGen.State cardState = CloudGen.StateOf(app.Config, it);
-            bool queued = !hasVid && !it.IsVideo && cardState == CloudGen.State.Queued;
+            info.Queued = !info.HasVideo && !it.IsVideo && cardState == CloudGen.State.Queued;
             // 11-14：没配 API 的工单绝不打「生成中」角标，那是假状态。
-            bool manual = !hasVid && !it.IsVideo && cardState == CloudGen.State.Manual;
-            if (hasVid || playing || queued || manual)
-            {
-                Border badge = new Border();
-                badge.CornerRadius = new CornerRadius(0, 8, 8, 0);
-                badge.Padding = new Thickness(8, 2, 8, 2);
-                badge.HorizontalAlignment = HorizontalAlignment.Left;
-                badge.VerticalAlignment = VerticalAlignment.Top;
-                badge.Margin = new Thickness(0, 8, 0, 0);
-                badge.Background = playing
-                    ? new SolidColorBrush(Color.FromArgb(228, 46, 92, 168))
-                    : queued
-                        ? new SolidColorBrush(Color.FromArgb(220, 40, 78, 84))
-                        : manual
-                            ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
-                            : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
+            info.Manual = !info.HasVideo && !it.IsVideo && cardState == CloudGen.State.Manual;
 
-                TextBlock bt = new TextBlock();
-                bt.Text = playing ? "▶ 播放中"
-                        : queued ? "☁ 生成中"
-                        : manual ? "⏸ 待处理" : "✦ 飘动";
-                bt.FontSize = 10.5;
-                bt.Foreground = playing ? Brushes.White
-                                        : queued ? new SolidColorBrush(Color.FromRgb(168, 232, 226))
-                                        : manual ? new SolidColorBrush(Color.FromRgb(240, 206, 146))
-                                                 : new SolidColorBrush(Color.FromRgb(228, 217, 255));
-                badge.Child = bt;
-                g.Children.Add(badge);
-            }
+            Border badge = new Border();
+            badge.CornerRadius = new CornerRadius(0, 8, 8, 0);
+            badge.Padding = new Thickness(8, 2, 8, 2);
+            badge.HorizontalAlignment = HorizontalAlignment.Left;
+            badge.VerticalAlignment = VerticalAlignment.Top;
+            badge.Margin = new Thickness(0, 8, 0, 0);
+            badge.Visibility = Visibility.Collapsed;
+            badge.Tag = info;
+
+            TextBlock bt = new TextBlock();
+            bt.FontSize = 10.5;
+            badge.Child = bt;
+            stateBadges.Add(badge);
+            g.Children.Add(badge);
 
             g.Children.Add(del);
 
@@ -3208,6 +3214,74 @@ namespace WallpaperManager
             statusLeft.Text = text;
         }
 
+        /// <summary>按当前真实状态刷一张角标。alive 由 RefreshBadges 算一次传进来，
+        /// 别每张卡都去枚举进程，也别在这里碰磁盘/画面指纹（看门狗每 4 秒会调一次）。</summary>
+        void ApplyBadge(Border badge, bool alive)
+        {
+            BadgeInfo info = badge.Tag as BadgeInfo;
+            TextBlock bt = badge.Child as TextBlock;
+            if (info == null || bt == null) return;
+
+            bool playing = app.IsPlaying(info.Item, alive);
+            bool queued = info.Queued;
+            bool manual = info.Manual;
+
+            if (!info.HasVideo && !playing && !queued && !manual)
+            {
+                badge.Visibility = Visibility.Collapsed;
+                bt.Text = "";
+                return;
+            }
+
+            badge.Visibility = Visibility.Visible;
+            badge.Background = playing
+                ? new SolidColorBrush(Color.FromArgb(228, 46, 92, 168))
+                : queued
+                    ? new SolidColorBrush(Color.FromArgb(220, 40, 78, 84))
+                    : manual
+                        ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
+                        : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
+
+            bt.Text = playing ? "▶ 播放中"
+                    : queued ? "☁ 生成中"
+                    : manual ? "⏸ 待处理" : "✦ 飘动";
+            bt.Foreground = playing ? Brushes.White
+                                    : queued ? new SolidColorBrush(Color.FromRgb(168, 232, 226))
+                                    : manual ? new SolidColorBrush(Color.FromRgb(240, 206, 146))
+                                             : new SolidColorBrush(Color.FromRgb(228, 217, 255));
+        }
+
+        /// <summary>
+        /// 状态一变就调这个：只改角标文字/颜色，不重建卡片、不闪图。
+        /// 「播放中」除了看配置，还要求播放器进程真的活着 —— 配置万一残留，
+        /// 进程已经没了也绝不显示假的播放中。
+        /// </summary>
+        public void RefreshBadges()
+        {
+            bool alive = app.PlayingNow();
+            for (int i = 0; i < stateBadges.Count; i++) ApplyBadge(stateBadges[i], alive);
+        }
+
+        /// <summary>自检用：读某张卡当前的角标文字。null = 没这张卡，"" = 角标隐藏。</summary>
+        public string SelfTestBadgeText(string id)
+        {
+            for (int i = 0; i < stateBadges.Count; i++)
+            {
+                BadgeInfo info = stateBadges[i].Tag as BadgeInfo;
+                if (info == null || info.Item == null || info.Item.Id != id) continue;
+                if (stateBadges[i].Visibility != Visibility.Visible) return "";
+                TextBlock t = stateBadges[i].Child as TextBlock;
+                return t == null ? "" : t.Text;
+            }
+            return null;
+        }
+
+        /// <summary>自检用：读状态栏右侧「当前：xxx」。</summary>
+        public string SelfTestStatusRight()
+        {
+            return statusRight.Text;
+        }
+
         public void UpdateStatusRight()
         {
             string cur = currentItem == null ? "未设置" : DisplayTitle(currentItem.Title);
@@ -3225,6 +3299,7 @@ namespace WallpaperManager
             currentItem = it;
             UpdateStatusRight();
             HighlightCurrent();
+            RefreshBadges();        // 「当前」变了，播放中角标也要跟着走
         }
 
         void HighlightCurrent()

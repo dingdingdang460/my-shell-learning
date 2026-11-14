@@ -1074,5 +1074,234 @@ namespace WallpaperManager
 
             return Finish(sb, pass, total);
         }
+
+        /// <summary>
+        /// 11-14 深夜：主人「怎么我切换了壁纸，上一个壁纸的动态视频还显示播放中？」
+        /// 复现整条状态链：开播 A → 切到静态 B → 切到 C 开播 → 新片启动失败 →
+        /// 配置残留但播放器已死。逐项断言卡片角标、Config 状态、托盘文案。
+        /// 全隔离：LibRoot / config 指向仓库内 .selftest-tmp，播放器动作被注入跳过，
+        /// 不设系统壁纸、不动 D:\Wallpaper、不碰 %APPDATA%、不起真播放器。
+        /// </summary>
+        public static string SwitchGuard(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+
+            string savedLib = app.Config.LibRoot;
+            string savedDir = ConfigStore.DirOverride;
+            bool savedDyn = app.Config.DynamicEnabled;
+            string savedDynId = app.Config.LastDynamicId;
+            string savedLastId = app.Config.LastId;
+            List<WallpaperItem> savedItems = app.Items;
+            int savedOverride = app.SelfTestAliveOverride;
+            bool savedNoOps = app.SelfTestNoPlayerOps;
+
+            string tmp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".selftest-tmp", "badge");
+            string lib = Path.Combine(tmp, "lib");
+            string cfg = Path.Combine(tmp, "cfg");
+
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(lib, "videos"));
+                Directory.CreateDirectory(Path.Combine(lib, "images"));
+                Directory.CreateDirectory(cfg);
+                ConfigStore.DirOverride = cfg;
+                app.Config.LibRoot = lib;
+                app.SelfTestNoPlayerOps = true;
+                app.SelfTestAliveOverride = 1;      // 假装播放器在跑
+
+                WallpaperItem a = BadgeItem("zz-badge-a", "甲图");
+                WallpaperItem b = BadgeItem("zz-badge-b", "乙图");
+                WallpaperItem c = BadgeItem("zz-badge-c", "丙图");
+                app.Items = new List<WallpaperItem>();
+                app.Items.Add(a); app.Items.Add(b); app.Items.Add(c);
+
+                MainWindow w = app.SelfTestWindow;
+                Hit(sb, ref pass, ref total, "自检窗口已就绪", w != null, "");
+                if (w == null) return Finish(sb, pass, total);
+
+                w.RefreshList();
+                Hit(sb, ref pass, ref total, "三张测试卡都建出角标控件",
+                    w.SelfTestBadgeText(a.Id) != null
+                    && w.SelfTestBadgeText(b.Id) != null
+                    && w.SelfTestBadgeText(c.Id) != null, "");
+                Hit(sb, ref pass, ref total, "隔离库是空的（不会误认出飘动片）",
+                    !app.HasCloudVideo(a) && !app.HasCloudVideo(b) && !app.HasCloudVideo(c), "");
+
+                // ---- 1. 开播 A ----
+                app.MarkPlaying(a);
+                Hit(sb, ref pass, ref total, "开播 A：A 显示「播放中」",
+                    w.SelfTestBadgeText(a.Id) == "▶ 播放中", w.SelfTestBadgeText(a.Id));
+                Hit(sb, ref pass, ref total, "开播 A：B / C 不显示「播放中」",
+                    w.SelfTestBadgeText(b.Id) != "▶ 播放中" && w.SelfTestBadgeText(c.Id) != "▶ 播放中", "");
+                Hit(sb, ref pass, ref total, "开播 A：总闸打开且 id 指向 A",
+                    app.Config.DynamicEnabled && app.Config.LastDynamicId == a.Id, "");
+                Hit(sb, ref pass, ref total, "开播 A：状态栏当前是甲图",
+                    w.SelfTestStatusRight().IndexOf("甲图") >= 0, w.SelfTestStatusRight());
+                Hit(sb, ref pass, ref total, "开播 A：托盘显示动态播放中",
+                    app.SelfTestTrayText().IndexOf("播放中") >= 0, app.SelfTestTrayText());
+
+                // ---- 2. 切到静态 B：走 DoSet 成功后的同一个收口，不真设系统壁纸 ----
+                app.SelfTestAliveOverride = 0;      // 播放器已被收掉
+                app.MarkStopped();
+                Hit(sb, ref pass, ref total, "切静态：A 不再显示「播放中」",
+                    w.SelfTestBadgeText(a.Id) != "▶ 播放中", w.SelfTestBadgeText(a.Id));
+                Hit(sb, ref pass, ref total, "切静态：B 也不显示「播放中」",
+                    w.SelfTestBadgeText(b.Id) != "▶ 播放中", "");
+                Hit(sb, ref pass, ref total, "切静态：总闸已关", !app.Config.DynamicEnabled, "");
+                Hit(sb, ref pass, ref total, "切静态：LastDynamicId 已清空（旧片不会复活）",
+                    app.Config.LastDynamicId == "", app.Config.LastDynamicId);
+                Hit(sb, ref pass, ref total, "切静态：托盘不再显示播放中",
+                    app.SelfTestTrayText().IndexOf("播放中") < 0, app.SelfTestTrayText());
+                Hit(sb, ref pass, ref total, "切静态：IsPlayingNow 为假", !app.IsPlayingNow(), "");
+
+                // ---- 3. 切到 C 开播：角标必须跟着走，A 不能复活 ----
+                app.SelfTestAliveOverride = 1;
+                app.MarkPlaying(c);
+                Hit(sb, ref pass, ref total, "切到 C：C 显示「播放中」",
+                    w.SelfTestBadgeText(c.Id) == "▶ 播放中", w.SelfTestBadgeText(c.Id));
+                Hit(sb, ref pass, ref total, "切到 C：A 不复活",
+                    w.SelfTestBadgeText(a.Id) != "▶ 播放中", w.SelfTestBadgeText(a.Id));
+                Hit(sb, ref pass, ref total, "切到 C：状态栏当前是丙图",
+                    w.SelfTestStatusRight().IndexOf("丙图") >= 0, w.SelfTestStatusRight());
+
+                // ---- 4. 换到一张根本播不了的视频：失败也不能留着上一张在播 ----
+                WallpaperItem bad = BadgeItem("zz-badge-bad", "坏片");
+                bad.IsVideo = true;
+                bad.File = "videos/no-such-file.mp4";
+                app.Items.Add(bad);
+                w.RefreshList();
+                app.MarkPlaying(c);
+                Hit(sb, ref pass, ref total, "失败前 C 确实在播",
+                    w.SelfTestBadgeText(c.Id) == "▶ 播放中", "");
+                app.StartDynamic(bad);
+                Hit(sb, ref pass, ref total, "启动失败：C 的「播放中」被清掉",
+                    w.SelfTestBadgeText(c.Id) != "▶ 播放中", w.SelfTestBadgeText(c.Id));
+                Hit(sb, ref pass, ref total, "启动失败：A 也不复活",
+                    w.SelfTestBadgeText(a.Id) != "▶ 播放中", "");
+                Hit(sb, ref pass, ref total, "启动失败：总闸关闭", !app.Config.DynamicEnabled, "");
+                Hit(sb, ref pass, ref total, "启动失败：LastDynamicId 已清空",
+                    app.Config.LastDynamicId == "", app.Config.LastDynamicId);
+                Hit(sb, ref pass, ref total, "启动失败：托盘不含播放中",
+                    app.SelfTestTrayText().IndexOf("播放中") < 0, app.SelfTestTrayText());
+                Hit(sb, ref pass, ref total, "启动失败：没碰真实播放器进程",
+                    app.SelfTestNoPlayerOps, "");
+
+                // ---- 5. 配置万一残留、但进程已经死了：角标不许撒谎 ----
+                app.Config.DynamicEnabled = true;
+                app.Config.LastDynamicId = a.Id;
+                app.SelfTestAliveOverride = 0;
+                w.RefreshBadges();
+                app.UpdateTrayTip();
+                Hit(sb, ref pass, ref total, "进程已死：配置残留也不显示「播放中」",
+                    w.SelfTestBadgeText(a.Id) != "▶ 播放中", w.SelfTestBadgeText(a.Id));
+                Hit(sb, ref pass, ref total, "进程已死：托盘不认假状态",
+                    app.SelfTestTrayText().IndexOf("播放中") < 0, app.SelfTestTrayText());
+                Hit(sb, ref pass, ref total, "IsPlaying 对 alive=false 返回假",
+                    !app.IsPlaying(a, false) && app.IsPlaying(a, true), "");
+
+                // ---- 6. 进程回来时角标要能自己恢复（看门狗每 4 秒刷一次）----
+                app.SelfTestAliveOverride = 1;
+                w.RefreshBadges();
+                Hit(sb, ref pass, ref total, "进程回来：角标实时恢复「播放中」",
+                    w.SelfTestBadgeText(a.Id) == "▶ 播放中", w.SelfTestBadgeText(a.Id));
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                app.Config.DynamicEnabled = savedDyn;
+                app.Config.LastDynamicId = savedDynId;
+                app.Config.LastId = savedLastId;
+                app.Config.LibRoot = savedLib;
+                app.Items = savedItems;
+                app.SelfTestAliveOverride = savedOverride;
+                app.SelfTestNoPlayerOps = savedNoOps;
+                ConfigStore.DirOverride = savedDir;
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            return Finish(sb, pass, total);
+        }
+
+        static WallpaperItem BadgeItem(string id, string title)
+        {
+            WallpaperItem it = new WallpaperItem();
+            it.Id = id;
+            it.Title = title;
+            it.Tag = "other";
+            it.IsVideo = false;
+            return it;
+        }
+
+        /// <summary>
+        /// 11-15 凌晨：Dynamic.Launch 改成「窗口没上屏就如实报失败」，
+        /// 得真跑一次播放器才能确认没把正常开播搞坏。
+        /// 只读库里一个 mp4 试播约 1 秒再收掉；config 隔离到仓库内临时目录，
+        /// 不设系统壁纸、不改真实配置、不碰 D:\Wallpaper 里任何文件。
+        /// </summary>
+        public static string LaunchGuard(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+            string savedDir = ConfigStore.DirOverride;
+            string tmp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".selftest-tmp", "launch");
+
+            try
+            {
+                Directory.CreateDirectory(tmp);
+                ConfigStore.DirOverride = tmp;
+                app.SelfTestAliveOverride = -1;      // 这一项就是要看真实进程
+
+                string vdir = Path.Combine(app.Config.LibRoot, "videos");
+                string[] mp4 = Directory.Exists(vdir)
+                    ? Directory.GetFiles(vdir, "*.mp4") : new string[0];
+                Hit(sb, ref pass, ref total, "库里有可试播的 mp4", mp4.Length > 0, mp4.Length + " 个");
+                Hit(sb, ref pass, ref total, "播放器 exe 已构建", Dynamic.PlayerExists, Dynamic.PlayerPath);
+                Hit(sb, ref pass, ref total, "开播前没有残留播放器", !Dynamic.Alive, "");
+                if (mp4.Length == 0 || !Dynamic.PlayerExists) return Finish(sb, pass, total);
+
+                string err;
+                bool ok = Dynamic.Start(mp4[0], 30, out err);
+                bool alive = Dynamic.Alive;
+                Hit(sb, ref pass, ref total, "窗口正常上屏时 Start 返回成功", ok, "err=" + err);
+                Hit(sb, ref pass, ref total, "播放器进程确实起来了", alive, "");
+                Hit(sb, ref pass, ref total, "播放器窗口挂在桌面层", Dynamic.WindowAlive, "");
+
+                // 真进程在跑 → 状态判定必须跟着真进程走
+                app.Config.DynamicEnabled = true;
+                app.Config.LastDynamicId = "zz-launch-probe";
+                app.UpdateTrayTip();
+                Hit(sb, ref pass, ref total, "真进程在跑时 IsPlayingNow 为真", app.IsPlayingNow(), "");
+                Hit(sb, ref pass, ref total, "托盘按真进程显示播放中",
+                    app.SelfTestTrayText().IndexOf("播放中") >= 0, app.SelfTestTrayText());
+
+                Dynamic.Stop();
+                Hit(sb, ref pass, ref total, "Stop 后播放器进程收干净", !Dynamic.Alive, "");
+                Hit(sb, ref pass, ref total, "Stop 后 IsPlayingNow 立刻变假（不留播放中）",
+                    !app.IsPlayingNow(), "");
+                app.MarkStopped();
+                Hit(sb, ref pass, ref total, "MarkStopped 后总闸与 lastDynamicId 都清干净",
+                    !app.Config.DynamicEnabled && app.Config.LastDynamicId == "", "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                try { Dynamic.Stop(); } catch { }
+                app.Config.DynamicEnabled = false;
+                app.Config.LastDynamicId = "";
+                app.SelfTestAliveOverride = -1;
+                ConfigStore.DirOverride = savedDir;
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+            return Finish(sb, pass, total);
+        }
     }
 }

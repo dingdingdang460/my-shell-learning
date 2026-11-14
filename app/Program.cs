@@ -91,6 +91,13 @@ namespace WallpaperManager
         DispatcherTimer fullscreenTimer;
         bool dynamicPausedByFullscreen;
 
+        // 11-14 深夜：切换壁纸后「▶ 播放中」定格在上一张卡片上。
+        // 根因是 DynamicEnabled / LastDynamicId / cursor / 界面角标各写各的，
+        // 失败路径还整个不清理。下面这一组是唯一的收口，所有路径都必须走它。
+        // 自检专用注入：不让 --badgetest 碰用户正在播的播放器进程。
+        public int SelfTestAliveOverride = -1;   // -1=看真实进程 0=强制没在播 1=强制在播
+        public bool SelfTestNoPlayerOps;
+
         [DllImport("wtsapi32.dll", SetLastError = true)]
         static extern bool WTSRegisterSessionNotification(IntPtr hWnd, int dwFlags);
 
@@ -172,7 +179,9 @@ namespace WallpaperManager
                     || s.Equals("--relatedvideotest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--orphantest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--clouddialogtest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--contenttest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--contenttest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--badgetest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--launchtest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -709,6 +718,49 @@ namespace WallpaperManager
                     auto.Start();
                     break;
                 }
+                if (string.Equals(s, "--badgetest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14 深夜：「切换了壁纸，上一个壁纸的动态视频还显示播放中」。
+                    // 全隔离复现状态链，不设系统壁纸、不起播放器、不碰外部数据。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.SwitchGuard(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --badgetest：\r\n" + detail);
+                        Log.Note("自检 --badgetest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--launchtest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-15：真跑一次播放器，确认「窗口没上屏就报失败」没把正常开播搞坏。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.LaunchGuard(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --launchtest：\r\n" + detail);
+                        Log.Note("自检 --launchtest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
                 if (string.Equals(s, "--importexporttest", StringComparison.OrdinalIgnoreCase))
                 {
                     // 11-14：真点「导出配置…/导入配置…」按钮，验整条链路与零污染。
@@ -1192,6 +1244,9 @@ namespace WallpaperManager
         void WatchdogTick()
         {
             if (ReallyExit) return;
+            // v0.9.1：每轮把角标跟真实播放器进程对一次齐。哪怕哪条路径漏了
+            // 收口，最多 4 秒「播放中」也会自己消失，不会再定格在上一张卡片上。
+            if (win != null) win.RefreshBadges();
             if (Environment.TickCount < watchdogReadyAt) return;
             if (!Config.DynamicEnabled) return;          // 用户主动停了就不复活
 
@@ -1213,8 +1268,8 @@ namespace WallpaperManager
             // 连续重启 5 次还回不来，说明不是"掉一下"，是真起不来，别无限刷
             if (watchRestarts >= 5)
             {
-                Config.DynamicEnabled = false;
-                ConfigStore.Save(Config);
+                StopPlayback();
+                MarkStopped();
                 Log.Note("看门狗：连续 5 次重启都失败，先关掉动态壁纸（可在托盘里重新开）");
                 if (win != null) win.SetStatus("动态壁纸反复掉线，已自动关闭");
                 return;
@@ -1240,10 +1295,15 @@ namespace WallpaperManager
             watchRestarts++;
             Log.Note("恢复动态壁纸（第 " + watchRestarts + " 次）：" + target.Title);
 
-            if (Dynamic.Alive) Dynamic.Stop();           // 进程在但窗口没了，先收干净再起
+            if (!SelfTestNoPlayerOps && Dynamic.Alive) Dynamic.Stop();   // 进程在但窗口没了，先收干净再起
             string err;
             if (!StartMotion(target, out err))
+            {
                 Log.Note("恢复失败：" + err);
+                // 恢复不起来时别让界面继续挂着「播放中」：刷一次角标，
+                // 它会按播放器进程是否真的活着把假状态收掉。
+                if (win != null) win.RefreshBadges();
+            }
         }
 
         public void ReloadLibrary()
@@ -1473,14 +1533,16 @@ namespace WallpaperManager
             menu.Opening += delegate
             {
                 WallpaperItem cur = cursor >= 0 && cursor < Items.Count ? Items[cursor] : null;
-                miState.Text = "当前：" + (Config.DynamicEnabled
+                // 菜单文案也按「播放器真的在跑」来，别拿残留配置骗人
+                bool dynNow = IsPlayingNow();
+                miState.Text = "当前：" + (dynNow
                     ? "动态播放 " + (cur == null ? "" : cur.Title)
                     : (cur == null ? "没有壁纸" : "静态壁纸 " + cur.Title));
                 miRotate.Text = Config.AutoRotate ? "暂停定时轮换" : "继续定时轮换";
-                miDyn.Text = Config.DynamicEnabled ? "动态壁纸（播放中）" : "动态壁纸";
-                miDynPause.Enabled = Config.DynamicEnabled;
-                miDynResume.Enabled = Config.DynamicEnabled;
-                miDynStop.Enabled = Config.DynamicEnabled || (cur != null && cur.Motion);
+                miDyn.Text = dynNow ? "动态壁纸（播放中）" : "动态壁纸";
+                miDynPause.Enabled = dynNow;
+                miDynResume.Enabled = dynNow;
+                miDynStop.Enabled = dynNow || (cur != null && cur.Motion);
                 for (int k = 0; k < layerItems.Length; k++)
                     if (layerItems[k] != null) layerItems[k].Checked = (layerModes[k] == Config.MountMode);
             };
@@ -1501,11 +1563,11 @@ namespace WallpaperManager
         }
 
         /// <summary>托盘图标的悬浮提示跟着当前状态走，鼠标放上去就知道现在是动态还是静态</summary>
-        void UpdateTrayTip()
+        public void UpdateTrayTip()
         {
             if (tray == null) return;
             string s = "壁纸管家";
-            if (Config.DynamicEnabled) s += " · 动态播放中（点右键可停止）";
+            if (IsPlayingNow()) s += " · 动态播放中（点右键可停止）";
             else if (cursor >= 0 && cursor < Items.Count) s += " · 静态壁纸：" + Items[cursor].Title;
             if (s.Length > 63) s = s.Substring(0, 63);      // NotifyIcon.Text 上限
             try { tray.Text = s; } catch { }
@@ -1554,6 +1616,79 @@ namespace WallpaperManager
             });
         }
 
+        // ---------------- 播放状态唯一收口（v0.9.1） ----------------
+
+        /// <summary>播放器进程是否真的活着；自检时可以注入，避免杀掉用户正在播的壁纸。</summary>
+        public bool PlayingNow()
+        {
+            if (SelfTestAliveOverride == 0) return false;
+            if (SelfTestAliveOverride == 1) return true;
+            return Dynamic.Alive;
+        }
+
+        /// <summary>「动态壁纸现在真的在桌面上」。配置残留但进程没了，就不算在播。</summary>
+        public bool IsPlayingNow()
+        {
+            return Config.DynamicEnabled && PlayingNow();
+        }
+
+        /// <summary>这张是不是正在铺在桌面上。除了配置，还必须播放器真的活着。</summary>
+        public bool IsPlaying(WallpaperItem it, bool alive)
+        {
+            if (it == null || string.IsNullOrEmpty(it.Id)) return false;
+            return Config.DynamicEnabled
+                   && !string.IsNullOrEmpty(Config.LastDynamicId)
+                   && Config.LastDynamicId == it.Id
+                   && alive;
+        }
+
+        /// <summary>开播成功的唯一入口：状态、光标、界面、托盘一次对齐。</summary>
+        public void MarkPlaying(WallpaperItem it)
+        {
+            if (it == null) return;
+            Config.DynamicEnabled = true;
+            Config.LastDynamicId = it.Id;
+            Config.LastId = it.Id;          // 下次启动恢复的是「正在播的这个视频」
+            cursor = IndexOf(it);
+            ConfigStore.Save(Config);
+            if (win != null)
+            {
+                win.SetCurrent(it);
+                win.RefreshBadges();
+            }
+            UpdateTrayTip();
+        }
+
+        /// <summary>
+        /// 一切「不再播动态」的路径都走这里：关总闸、清掉上次那个 id、刷角标和托盘。
+        /// 以前只把 DynamicEnabled 置 false，LastDynamicId 还留着上一张 ——
+        /// 看门狗或下次启动一旦把总闸打开，旧片就被拉回来了。
+        /// </summary>
+        public bool MarkStopped()
+        {
+            bool changed = Config.DynamicEnabled || !string.IsNullOrEmpty(Config.LastDynamicId);
+            Config.DynamicEnabled = false;
+            Config.LastDynamicId = "";
+            if (changed) ConfigStore.Save(Config);
+            if (win != null) win.RefreshBadges();
+            UpdateTrayTip();
+            return changed;
+        }
+
+        /// <summary>收播放器。隔离自检时统一跳过，不碰真实桌面进程。</summary>
+        void StopPlayback()
+        {
+            if (SelfTestNoPlayerOps) return;
+            Dynamic.Stop();
+        }
+
+        public MainWindow SelfTestWindow { get { return win; } }
+        public string SelfTestTrayText()
+        {
+            try { return tray == null ? "" : (tray.Text ?? ""); }
+            catch { return ""; }
+        }
+
         public void StopDynamic(bool backToStatic)
         {
             Log.Note("停止动态壁纸（恢复静态=" + backToStatic + "）");
@@ -1570,17 +1705,14 @@ namespace WallpaperManager
                 //
                 // 顺序也变了：不再先 Dynamic.Stop()，而是让 DoSet 先把系统壁纸
                 // 换成这张，再收播放器 —— 先停的话桌面会空一下、露出上一张系统壁纸。
+                MarkStopped();              // 先关闸，别让看门狗在 DoSet 之前把旧片拉回来
                 ApplyItem(cur, false);      // false = 这次必须静态，不许再自动开播
                 if (win != null) win.SetStatus("动态壁纸已停止，已恢复静态壁纸：" + cur.Title);
             }
             else
             {
-                Dynamic.Stop();
-                if (Config.DynamicEnabled)
-                {
-                    Config.DynamicEnabled = false;
-                    ConfigStore.Save(Config);
-                }
+                StopPlayback();
+                MarkStopped();
                 if (win != null) win.SetStatus("动态壁纸已停止");
             }
             UpdateTrayTip();
@@ -1623,11 +1755,7 @@ namespace WallpaperManager
             string err;
             if (StartMotion(it, out err))
             {
-                Config.DynamicEnabled = true;
-                Config.LastDynamicId = it.Id;
-                Config.LastId = it.Id;          // 下次启动恢复的是「正在播的这个视频」
-                cursor = IndexOf(it);
-                ConfigStore.Save(Config);
+                MarkPlaying(it);
                 if (win != null)
                 {
                     string what = it.IsVideo ? "（" + Config.DynamicFps + "fps 上限）" : "（云端飘动视频）";
@@ -1636,7 +1764,13 @@ namespace WallpaperManager
             }
             else
             {
-                if (win != null) win.SetStatus("动态壁纸启动失败：" + err);
+                // v0.9.1：换台失败绝不能留着上一张的视频继续播、角标继续写「播放中」。
+                // 以前这里只弹一句状态栏，DynamicEnabled/LastDynamicId/播放器全都不动，
+                // 用户切了壁纸看到的还是上一张在「播放中」。
+                StopPlayback();
+                MarkStopped();
+                if (win != null) win.SetStatus("动态壁纸启动失败：" + err + "（已停掉上一张的视频）");
+                Log.Note("动态壁纸启动失败，已停止播放：" + err);
             }
             UpdateTrayTip();
         }
@@ -1733,9 +1867,8 @@ namespace WallpaperManager
             if (next) ApplyItem(it);              // 直接开播
             else
             {
-                Dynamic.Stop();
-                Config.DynamicEnabled = false;
-                ConfigStore.Save(Config);
+                StopPlayback();
+                MarkStopped();
                 ApplyItem(it, false);              // 强制退回静态壁纸
             }
 
@@ -3050,9 +3183,8 @@ namespace WallpaperManager
             bool wasDynamic = (Config.LastDynamicId == it.Id);
             if (wasDynamic)
             {
-                Dynamic.Stop();
-                Config.DynamicEnabled = false;
-                Config.LastDynamicId = "";
+                StopPlayback();
+                MarkStopped();
             }
 
             string err;
@@ -3272,11 +3404,9 @@ namespace WallpaperManager
                 // （往往正是刚下载的那张），然后才被新壁纸覆盖 —— 看起来就是
                 // 「先弹出别的图再切换」。真正的收尾放在 DoSet 里，
                 // 等系统壁纸已经换成目标图之后再停。
-                if (Config.DynamicEnabled)
-                {
-                    Config.DynamicEnabled = false;
-                    ConfigStore.Save(Config);
-                }
+                // 但状态必须先收干净：以前只把 DynamicEnabled 置 false，
+                // LastDynamicId 还指着上一张，角标和看门狗都还认旧片。
+                MarkStopped();
             }
             // 视频项不是「一张图」：直接开动态壁纸。
             // 以前这里不分视频/图片，视频项也走 DoSet（把封面 jpg 设成壁纸），
@@ -3387,19 +3517,15 @@ namespace WallpaperManager
             {
                 // 动态层等系统壁纸换好了再收：收掉的那一瞬间桌面直接露出新图，
                 // 不会先让上一张系统壁纸抢一下镜。
-                if (Dynamic.Alive) Dynamic.Stop();
+                if (!SelfTestNoPlayerOps && Dynamic.Alive) Dynamic.Stop();
 
-                // 关键：静态壁纸一旦落地，就必须把「自动恢复动态」关掉。
+                // 关键：静态壁纸一旦落地，必须关总闸并清掉上次那个 id。
                 // 之前这里只停了播放器、没动 DynamicEnabled，看门狗每 4 秒查一次，
                 // 连续两次（约 8 秒）看到「动态开着、进程没了」就按 LastDynamicId
                 // 把上一张动态壁纸重新拉起来 —— 用户的体感就是
                 // 「新图设好没几秒自己弹走，壁纸怎么都换不掉」。
-                if (Config.DynamicEnabled)
-                {
-                    Config.DynamicEnabled = false;
-                    ConfigStore.Save(Config);
+                if (MarkStopped())
                     Log.Note("回到静态壁纸，已关掉自动恢复（防止看门狗把旧动态壁纸拉回来）");
-                }
 
                 Config.LastId = it.Id;
                 ConfigStore.Save(Config);
@@ -3413,6 +3539,9 @@ namespace WallpaperManager
             }
             else
             {
+                // 连静态壁纸都没设上，更不能把上一张的动态视频留在桌面上
+                StopPlayback();
+                MarkStopped();
                 Log.Note("设置壁纸失败：" + real);
                 win.SetStatus("设置壁纸失败，路径：" + real);
             }

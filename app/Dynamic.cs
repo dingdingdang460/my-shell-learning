@@ -179,13 +179,24 @@ namespace WallpaperManager
                 LastLaunchTick = Environment.TickCount;
                 Log.Note("动态壁纸启动：" + desc + " mount=" + MountMode + "（交接模式）");
 
-                // 等新窗口上屏再收旧的。正常 250~400ms；起不来最多等 1.8 秒，
+                // 等新窗口上屏再收旧的。正常 250~400ms；起不来最多等 2.5 秒，
                 // 之后无论如何都要把旧的收掉，不能留两个播放器抢桌面。
-                bool shown = WaitPlayerWindow(newPid, proc, 1800);
-                if (!shown)
-                    Log.Note("新播放器 1.8 秒内没亮出窗口（pid=" + newPid + "），先收掉旧的，别留两个");
-
+                bool shown = WaitPlayerWindow(newPid, proc, 2500);
                 StopOld(oldProc, oldHwnd, newPid);
+
+                if (!shown)
+                {
+                    // v0.9.1：以前窗口没亮出来也 return true，上层照样把
+                    // 「正在播新图」写进配置、卡片亮起「▶ 播放中」，可桌面其实
+                    // 什么动态都没有 —— 或者更糟，旧的还在播。现在如实报失败，
+                    // 让上层停干净、清状态，不再留假的播放中。
+                    err = "播放器窗口 2.5 秒内没上屏（视频解不开或桌面层挂载失败）";
+                    Log.Note("动态壁纸启动失败：" + err + " pid=" + newPid);
+                    lastStopTick = Environment.TickCount;   // 主动收的，不算崩溃
+                    try { if (proc != null && !proc.HasExited) proc.Kill(); } catch { }
+                    proc = null;
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)
