@@ -134,15 +134,44 @@ namespace WallpaperManager
         /// </summary>
         public static bool Enqueue(AppConfig cfg, WallpaperItem it, string imagePath, out string msg)
         {
+            return Enqueue(cfg, it, imagePath, false, out msg);
+        }
+
+        /// <summary>
+        /// force=true 只来自主人明确点的「重新生成一片」：跳过「已有视频」闸，
+        /// 但先把旧片留一份 .bak-regen-* 备份，别把之前花过钱的片子弄丢。
+        /// 其余路径（GenCloud / StartCloud / SetMotionFx / 后台）一律走 false。
+        /// </summary>
+        public static bool Enqueue(AppConfig cfg, WallpaperItem it, string imagePath, bool force, out string msg)
+        {
             if (it == null || string.IsNullOrEmpty(it.Id)) { msg = "条目为空"; return false; }
 
             string vid = VideoPath(cfg.LibRoot, it.Id);
-            string ready = RelatedVideo.Find(cfg.LibRoot, it, imagePath);
-            if (ready != null)
+            if (force)
             {
-                msg = "这张已经有相关视频了（" + System.IO.Path.GetFileName(ready)
-                    + "），直接播，不用重新生成";
-                return false;
+                if (File.Exists(vid))
+                {
+                    try
+                    {
+                        string bak = vid + ".bak-regen-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                        if (!File.Exists(bak)) File.Copy(vid, bak, false);
+                        Log.Note("云端生成：重新出片前已备份旧片 ← " + Path.GetFileName(bak));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Note("!! 重新生成：旧片备份失败（不阻断下单）：" + ex.Message);
+                    }
+                }
+            }
+            else
+            {
+                string ready = RelatedVideo.Find(cfg.LibRoot, it, imagePath);
+                if (ready != null)
+                {
+                    msg = "这张已经有相关视频了（" + System.IO.Path.GetFileName(ready)
+                        + "），直接播，不用重新生成";
+                    return false;
+                }
             }
 
             if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
@@ -220,12 +249,15 @@ namespace WallpaperManager
         public static State StateOf(AppConfig cfg, WallpaperItem it)
         {
             if (it == null || string.IsNullOrEmpty(it.Id)) return State.None;
-            if (File.Exists(VideoPath(cfg.LibRoot, it.Id))) return State.Ready;
-            // 11-14：备份 / 变体命名 / 关联子文件夹 / 没带 id 的散片，都算「已就绪」，
-            // 界面菜单才不会把「播放这段视频」错写成「云端生成（要花钱）」。
-            if (!it.IsVideo && RelatedVideo.Find(cfg.LibRoot, it, null) != null) return State.Ready;
+            // 11-14 深夜：队列里有新单时优先显示「等待中」。
+            // 「重新生成一片」会在已有旧片的情况下写一单，这时不能再报 Ready，
+            // 否则主人点了重新生成却看不到任何变化，又变成「假的」。
             if (File.Exists(JobPath(it.Id)))
                 return GenApi.Ready(cfg) ? State.Queued : State.Manual;
+            if (File.Exists(VideoPath(cfg.LibRoot, it.Id))) return State.Ready;
+            // 11-14：备份 / 变体命名 / 关联子文件夹 / 画面确认同一张的散片，都算「已就绪」，
+            // 界面菜单才不会把「播放这段视频」错写成「云端生成（要花钱）」。
+            if (!it.IsVideo && RelatedVideo.Find(cfg.LibRoot, it, null) != null) return State.Ready;
             if (File.Exists(Path.Combine(FailDir, it.Id + ".json"))) return State.Failed;
             return State.None;
         }

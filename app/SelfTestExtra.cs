@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -596,6 +597,8 @@ namespace WallpaperManager
             string savedPending = app.Config.PendingCloudId;
             bool savedNoDialogs = App.SelfTestNoDialogs;
             MessageBoxResult savedAnswer = App.SelfTestCloudAnswer;
+            bool savedNoRegenDialogs = App.SelfTestNoRegenDialogs;
+            MessageBoxResult savedRegenAnswer = App.SelfTestRegenAnswer;
             int dialogsBefore = App.CloudDialogCount;
             int realJobsBefore = CloudGen.PendingCount();
 
@@ -616,6 +619,8 @@ namespace WallpaperManager
                 app.Config.PendingCloudId = "";
                 App.SelfTestNoDialogs = true;
                 App.SelfTestCloudAnswer = MessageBoxResult.No;   // 选「先不生成」，不开设置窗口
+                App.SelfTestNoRegenDialogs = true;
+                App.SelfTestRegenAnswer = MessageBoxResult.No;
                 CloudGen.EnsureDirs();
 
                 WallpaperItem probe = new WallpaperItem();
@@ -658,6 +663,35 @@ namespace WallpaperManager
                     CloudGen.StateOf(app.Config, probe) == CloudGen.State.Manual,
                     CloudGen.StateOf(app.Config, probe).ToString());
                 try { File.Delete(zombie); } catch { }
+
+                // ---- 11-14 深夜：有片时「云端生成」入口也要能用（重新生成） ----
+                string mainVid = CloudGen.VideoPath(app.Config.LibRoot, probe.Id);
+                File.WriteAllBytes(mainVid, Encoding.UTF8.GetBytes("existing clip"));
+                RelatedVideo.Invalidate();
+                Hit(sb, ref pass, ref total, "造一份规范主文件，模拟已有片",
+                    app.HasCloudVideo(probe), "");
+
+                int regenBefore = App.RegenDialogCount;
+                int cfgBefore = App.CloudDialogCount;
+                app.RegenCloud(probe);                 // 自检里选「否」= 取消
+                Hit(sb, ref pass, ref total, "取消重新生成：确实弹了确认",
+                    App.RegenDialogCount == regenBefore + 1, "");
+                Hit(sb, ref pass, ref total, "取消后没写工单、旧片还在",
+                    !File.Exists(CloudGen.JobPath(probe.Id)) && File.Exists(mainVid), "");
+                Hit(sb, ref pass, ref total, "确认文案写明会再花钱",
+                    App.LastRegenDialog.IndexOf("再花一次钱") >= 0, "");
+
+                // 确认后也要过「没配 API 不许写假工单」的总闸（force 也不例外）
+                App.SelfTestRegenAnswer = MessageBoxResult.Yes;
+                string fmsg;
+                bool forced = app.QueueCloudGen(probe, probe.ImagePath, true, out fmsg);
+                Hit(sb, ref pass, ref total, "重新生成也必须先配 API，不写工单",
+                    !forced && !File.Exists(CloudGen.JobPath(probe.Id)), fmsg);
+                Hit(sb, ref pass, ref total, "重新生成的缺配置弹窗说清「重新生成」",
+                    App.CloudDialogCount == cfgBefore + 1
+                    && App.LastCloudDialog.IndexOf("重新生成一片需要先配好") >= 0, "");
+                Hit(sb, ref pass, ref total, "重新生成没扣费、没改动旧片",
+                    fmsg.IndexOf("没有扣费") >= 0 && File.Exists(mainVid), fmsg);
             }
             catch (Exception ex)
             {
@@ -674,6 +708,8 @@ namespace WallpaperManager
                 ConfigStore.DirOverride = savedDirOverride;
                 App.SelfTestNoDialogs = savedNoDialogs;
                 App.SelfTestCloudAnswer = savedAnswer;
+                App.SelfTestNoRegenDialogs = savedNoRegenDialogs;
+                App.SelfTestRegenAnswer = savedRegenAnswer;
                 RelatedVideo.Invalidate();
                 try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
             }
@@ -737,25 +773,49 @@ namespace WallpaperManager
                 App.SelfTestNoDialogs = true;
                 CloudGen.EnsureDirs();
 
-                byte[] sample = Encoding.UTF8.GetBytes("wallpaper-orphan-probe");
+                // 11-14 深夜：改成按画面判定，必须用真实图片 + 真实视频当样本。
+                // 源图 / 源片只读复制进隔离库（仓库内临时目录），不碰真实库任何文件。
+                string realRoot = savedRoot;
+                string realPic = Path.Combine(realRoot, "images", "biliart-17403571-4.jpg");
+                string realNewPic = Path.Combine(realRoot, "images", "biliart-27606684-1.jpg");
+                string realOrphan = Path.Combine(realRoot, "videos",
+                    "Anime_illustration_of_a_girl_w_2026-11-12T02-18-26.mp4");
+                bool samplesOk = File.Exists(realPic) && File.Exists(realNewPic) && File.Exists(realOrphan);
+                Hit(sb, ref pass, ref total, "真实库里能取到内容比对样本", samplesOk,
+                    samplesOk ? "图 / 新图 / 散片都在" : "样本缺失");
+                if (!samplesOk) return Finish(sb, pass, total);
+
                 WallpaperItem probe = new WallpaperItem();
                 probe.Id = "orphan-guard-01";
-                probe.Title = "未归属出片自检";
+                probe.Title = "画面确认同一张自检";
                 probe.File = "images/" + probe.Id + ".jpg";
                 probe.ImagePath = Path.Combine(lib, "images", probe.Id + ".jpg");
-                File.WriteAllBytes(probe.ImagePath, sample);
-                Put(lib, "images/landscape.jpg", sample);      // 有主的图，别让 KnownKeys 空着
+                File.Copy(realPic, probe.ImagePath, true);
+
+                WallpaperItem fresh = new WallpaperItem();
+                fresh.Id = "orphan-new-01";
+                fresh.Title = "刚下载的新图（画面不同）";
+                fresh.File = "images/" + fresh.Id + ".jpg";
+                fresh.ImagePath = Path.Combine(lib, "images", fresh.Id + ".jpg");
+                File.Copy(realNewPic, fresh.ImagePath, true);
+
+                // 指纹不可用的占位图，只用来让 KnownKeys 非空，不参与画面匹配
+                Put(lib, "images/landscape.jpg", Encoding.UTF8.GetBytes("not a real image"));
 
                 string orphanRel = "videos/Anime_girl_waving_2026-11-12T10-02-47.mp4";
                 string orphan = Path.Combine(lib, orphanRel);
-                Put(lib, orphanRel, sample);
+                File.Copy(realOrphan, orphan, true);
                 RelatedVideo.Invalidate();
 
                 string canonical = CloudGen.VideoPath(lib, probe.Id);
-                Hit(sb, ref pass, ref total, "没带 id 的原始出片被认出来",
+                Hit(sb, ref pass, ref total, "画面确认同一张的散片被认出来",
                     app.HasCloudVideo(probe), "");
                 Hit(sb, ref pass, ref total, "状态机报 Ready（菜单不会再说要生成）",
                     CloudGen.StateOf(app.Config, probe) == CloudGen.State.Ready, "");
+                Hit(sb, ref pass, ref total, "画面不同的新图绝不被认领（不串片）",
+                    !app.HasCloudVideo(fresh), "");
+                Hit(sb, ref pass, ref total, "新图状态仍是 None（可以正常去云端生成）",
+                    CloudGen.StateOf(app.Config, fresh) == CloudGen.State.None, "");
 
                 string m1, m2;
                 bool q = app.QueueCloudGen(probe, probe.ImagePath, out m1);
@@ -769,13 +829,13 @@ namespace WallpaperManager
                 Hit(sb, ref pass, ref total, "纯读：没有复制/新建规范主文件",
                     !File.Exists(canonical) && File.Exists(orphan), "");
 
-                // 反例：随便一个视频、或同前缀别的 id，不能被误认
+                // 反例：画面不同的散片、同前缀别的 id，都不能被误认
                 File.Delete(orphan);
-                Put(lib, "videos/totally-unrelated.mp4", sample);
-                Put(lib, "videos/" + probe.Id + "0.mp4", sample);
+                Put(lib, "videos/totally-unrelated.mp4", Encoding.UTF8.GetBytes("not a real video"));
+                Put(lib, "videos/" + probe.Id + "0.mp4", Encoding.UTF8.GetBytes("not a real video"));
                 RelatedVideo.Invalidate();
-                Hit(sb, ref pass, ref total, "无关视频 / 同前缀别的 id 不误认",
-                    !app.HasCloudVideo(probe), "");
+                Hit(sb, ref pass, ref total, "画面不同的视频 / 同前缀别的 id 不误认",
+                    !app.HasCloudVideo(probe) && !app.HasCloudVideo(fresh), "");
                 string m3;
                 bool allow = CloudGen.Enqueue(app.Config, probe, probe.ImagePath, out m3);
                 Hit(sb, ref pass, ref total, "没有任何相关视频时才允许下单",
@@ -817,6 +877,201 @@ namespace WallpaperManager
                 && string.Equals(app.Config.GenProvider, savedProvider, StringComparison.Ordinal)
                 && string.Equals(app.Config.GenApiKey, savedKey, StringComparison.Ordinal)
                 && string.Equals(GenApi.EndpointOverride, savedEndpoint, StringComparison.Ordinal), "");
+            return Finish(sb, pass, total);
+        }
+
+        /// <summary>
+        /// 11-14 深夜：主人「不要就近认领……你要做到区分图片与视频是否为同一张图片背景」。
+        /// 这个自检只读真实库：把「按名字明确归属」的 (图, 视频) 当正样本、别的图当负样本，
+        /// 再把所有未归属散片对每张图的距离矩阵打进日志，用来标定 MAD / dHash 阈值。
+        /// 全程只读，不写仓库外任何文件。
+        /// </summary>
+        public static string ContentGuard(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+            string root = app.Config.LibRoot;
+            string vdir = Path.Combine(root, "videos");
+
+            List<WallpaperItem> stills = new List<WallpaperItem>();
+            for (int i = 0; i < app.Items.Count; i++)
+            {
+                WallpaperItem x = app.Items[i];
+                if (!x.IsVideo && !string.IsNullOrEmpty(x.Id)) stills.Add(x);
+            }
+
+            List<string> pics = new List<string>();
+            List<VideoFingerprint.Fp> pf = new List<VideoFingerprint.Fp>();
+            for (int i = 0; i < stills.Count; i++)
+            {
+                WallpaperItem it = stills[i];
+                string p = "";
+                if (!string.IsNullOrEmpty(it.ImagePath) && File.Exists(it.ImagePath)) p = it.ImagePath;
+                else if (!string.IsNullOrEmpty(it.File))
+                {
+                    string q = Path.Combine(root, it.File.Replace('/', '\\'));
+                    if (File.Exists(q)) p = q;
+                }
+                pics.Add(p);
+                pf.Add(p.Length > 0 ? VideoFingerprint.Image(p) : null);
+            }
+            int okFp = 0;
+            for (int i = 0; i < pf.Count; i++) if (pf[i] != null) okFp++;
+            Hit(sb, ref pass, ref total, "静态图指纹全部可用", okFp == stills.Count && okFp > 0,
+                okFp + "/" + stills.Count);
+
+            // ---- 正 / 负样本：按名字明确归属的规范视频 ----
+            double maxPosMad = 0;
+            int maxPosHash = 0, posCount = 0;
+            double minNegMad = double.MaxValue;
+            int minNegHash = 64, negCount = 0;
+            for (int i = 0; i < stills.Count; i++)
+            {
+                string own = CloudGen.VideoPath(root, stills[i].Id);
+                if (!File.Exists(own) || pf[i] == null) continue;
+                VideoFingerprint.Fp vf = VideoFingerprint.Video(own);
+                int hd;
+                double mad = VideoFingerprint.Compare(pf[i], vf, out hd);
+                sb.Append("  [正] ").Append(stills[i].Id).Append(" ↔ ").Append(Path.GetFileName(own))
+                  .Append("  MAD=").Append(mad.ToString("0.000")).Append(" hash=").Append(hd).Append("\r\n");
+                if (mad < double.MaxValue)
+                {
+                    posCount++;
+                    if (mad > maxPosMad) maxPosMad = mad;
+                    if (hd > maxPosHash) maxPosHash = hd;
+                }
+                for (int j = 0; j < stills.Count; j++)
+                {
+                    if (i == j) continue;
+                    string other = CloudGen.VideoPath(root, stills[j].Id);
+                    if (!File.Exists(other)) continue;
+                    VideoFingerprint.Fp of = VideoFingerprint.Video(other);
+                    int hd2;
+                    double mad2 = VideoFingerprint.Compare(pf[i], of, out hd2);
+                    sb.Append("  [负] ").Append(stills[i].Id).Append(" ↔ ").Append(Path.GetFileName(other))
+                      .Append("  MAD=").Append(mad2.ToString("0.000")).Append(" hash=").Append(hd2).Append("\r\n");
+                    if (mad2 < minNegMad) minNegMad = mad2;
+                    if (hd2 < minNegHash) minNegHash = hd2;
+                    negCount++;
+                }
+            }
+            sb.Append("  正样本 ").Append(posCount).Append(" 对，MAD 最大 ").Append(maxPosMad.ToString("0.000"))
+              .Append(" / hash 最大 ").Append(maxPosHash).Append("\r\n");
+            sb.Append("  负样本 ").Append(negCount).Append(" 对，MAD 最小 ").Append(minNegMad.ToString("0.000"))
+              .Append(" / hash 最小 ").Append(minNegHash).Append("\r\n");
+            Hit(sb, ref pass, ref total, "有正样本和负样本", posCount > 0 && negCount > 0, "");
+            Hit(sb, ref pass, ref total, "画面指纹能把同图 / 异图分开",
+                maxPosMad < minNegMad, "正最大 " + maxPosMad.ToString("0.000")
+                                      + " < 负最小 " + minNegMad.ToString("0.000"));
+
+            // ---- 未归属散片 × 每张图 的距离矩阵 ----
+            List<string> vids = new List<string>();
+            if (Directory.Exists(vdir))
+            {
+                string[] fs = Directory.GetFiles(vdir, "*");
+                for (int i = 0; i < fs.Length; i++)
+                {
+                    string n = Path.GetFileName(fs[i]).ToLowerInvariant();
+                    if (n.IndexOf(".mp4", StringComparison.Ordinal) < 0
+                        || n.IndexOf(".mp4.bak", StringComparison.Ordinal) >= 0) continue;
+                    vids.Add(fs[i]);
+                }
+                string[] subs = Directory.GetDirectories(vdir);
+                for (int d = 0; d < subs.Length; d++)
+                {
+                    string[] sfs = Directory.GetFiles(subs[d], "*");
+                    for (int i = 0; i < sfs.Length; i++)
+                    {
+                        string n = Path.GetFileName(sfs[i]).ToLowerInvariant();
+                        if (n.IndexOf(".mp4", StringComparison.Ordinal) >= 0) vids.Add(sfs[i]);
+                    }
+                }
+            }
+            sb.Append("  ---- 未归属散片 对 静态图 距离矩阵 ----\r\n");
+            for (int v = 0; v < vids.Count; v++)
+            {
+                string file = vids[v];
+                string name = Path.GetFileName(file);
+                bool owned = false;
+                for (int i = 0; i < stills.Count; i++)
+                    if (name.ToLowerInvariant().StartsWith(stills[i].Id.ToLowerInvariant(), StringComparison.Ordinal))
+                    { owned = true; break; }
+                if (owned) continue;                 // 名字已明确归属，不用比画面
+
+                VideoFingerprint.Fp vf = VideoFingerprint.Video(file);
+                sb.Append("  ").Append(name).Append("\r\n");
+                for (int i = 0; i < stills.Count; i++)
+                {
+                    if (pf[i] == null) continue;
+                    int hd;
+                    double mad = VideoFingerprint.Compare(pf[i], vf, out hd);
+                    sb.Append("      ").Append(stills[i].Id)
+                      .Append("  MAD=").Append(mad.ToString("0.000"))
+                      .Append(" hash=").Append(hd)
+                      .Append(VideoFingerprint.Same(mad, hd) ? "  ✔同一画面" : "")
+                      .Append("\r\n");
+                }
+            }
+
+            // ---- 阈值有效性：同一画面全认、不同画面全不认 ----
+            int posSame = 0, negSame = 0;
+            for (int i = 0; i < stills.Count; i++)
+            {
+                string own = CloudGen.VideoPath(root, stills[i].Id);
+                if (!File.Exists(own) || pf[i] == null) continue;
+                VideoFingerprint.Fp vf = VideoFingerprint.Video(own);
+                int hd;
+                double mad = VideoFingerprint.Compare(pf[i], vf, out hd);
+                if (VideoFingerprint.Same(mad, hd)) posSame++;
+                for (int j = 0; j < stills.Count; j++)
+                {
+                    if (i == j) continue;
+                    string other = CloudGen.VideoPath(root, stills[j].Id);
+                    if (!File.Exists(other)) continue;
+                    VideoFingerprint.Fp of = VideoFingerprint.Video(other);
+                    int hd2;
+                    double mad2 = VideoFingerprint.Compare(pf[i], of, out hd2);
+                    if (VideoFingerprint.Same(mad2, hd2)) negSame++;
+                }
+            }
+            Hit(sb, ref pass, ref total, "同一画面全部判 Same、不同画面全部判不同",
+                posCount > 0 && posSame == posCount && negSame == 0,
+                "正 " + posSame + "/" + posCount + "，负误认 " + negSame);
+
+            // ---- 不串片：画面不匹配的图绝不能被判成「有片」 ----
+            // 11-14 深夜主人实测：刚下载的新图被就近认到别的壁纸的旧出片，点动态就播错。
+            int shouldNo = 0, actuallyNo = 0;
+            for (int i = 0; i < stills.Count; i++)
+            {
+                if (File.Exists(CloudGen.VideoPath(root, stills[i].Id))) continue;
+                if (pf[i] == null) continue;
+                bool anyMatch = false;
+                for (int v = 0; v < vids.Count && !anyMatch; v++)
+                {
+                    string nm = Path.GetFileName(vids[v]).ToLowerInvariant();
+                    bool owned = false;
+                    for (int k = 0; k < stills.Count; k++)
+                        if (nm.StartsWith(stills[k].Id.ToLowerInvariant(), StringComparison.Ordinal))
+                        { owned = true; break; }
+                    if (owned) continue;
+                    VideoFingerprint.Fp vf = VideoFingerprint.Video(vids[v]);
+                    int hd;
+                    double mad = VideoFingerprint.Compare(pf[i], vf, out hd);
+                    if (VideoFingerprint.Same(mad, hd)) anyMatch = true;
+                }
+                if (anyMatch) continue;
+                shouldNo++;
+                if (!app.HasCloudVideo(stills[i])) actuallyNo++;
+            }
+            Hit(sb, ref pass, ref total, "画面不匹配的图一律判「没有飘动视频」（不串片）",
+                shouldNo > 0 && shouldNo == actuallyNo, shouldNo + " 张应为无片，实判 " + actuallyNo + " 张");
+
+            // ---- 现场：每张图现在被判成有片 / 没片 ----
+            sb.Append("  ---- 现场判定 ----\r\n");
+            for (int i = 0; i < stills.Count; i++)
+                sb.Append("  ").Append(stills[i].Id).Append("  HasCloudVideo=")
+                  .Append(app.HasCloudVideo(stills[i])).Append("\r\n");
+
             return Finish(sb, pass, total);
         }
     }

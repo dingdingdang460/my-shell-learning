@@ -1139,3 +1139,90 @@ docs/PROGRESS.md              本文件
 自己跑出来的收货逻辑，不是助手手动改仓库外文件；主人若想彻底清掉 `done\` 里
 那张 JSON，说一声即可。
 远程仓库 URL 仍缺，未 push；真 Key 链路未碰。
+
+## 十七、11-14 深夜：按画面区分图片与视频（v0.9）
+
+### 1. 主人三连问与本轮红线
+
+1. 「刚下载了一张新壁纸，为啥点击动态会自动切换到别的壁纸视频」；
+2. 「搜索框旁边的飘动视频现在不是没有了吗」（筛选条「有飘动视频」被宽口径污染）；
+3. 「云端生成功能按钮怎么没有了」。
+随后追加两条硬要求：**「不要就近认领……你要做到区分图片与视频是否为同一张图片背景」**、
+「这个工作目录下完全权限，把需求一股气做完」。仓库外仍保持只读、改动前先问。
+
+### 2. 根因（日志实据）
+
+23:11:34 新图 `biliart-27606684-1`（23:11 刚下载）被 **v0.8 的 `FromOrphans()`**
+按「出片时间就近认领」自动挂到 `Anime_illustration_of_a_girl_w_2026-11-12T02-18-26.mp4` ——
+那片其实和 `videos\_raw\biliart-17403571-4.raw.mp4` 同为 2,388,693 字节，是**别的壁纸**的片子。
+`HasCloudVideo()` 误判 true → 顶栏「✦ 飘动视频」直接 `SetMotionFx` → 播错片，
+并把 `motion=true / fx=2` 写进 index.json。同一时刻 `biliart-20124447-14` 也被误认到另一段散片。
+另外旧版把「有片」时右键菜单 / 大图预览的按钮整个换成「播放这段视频」，
+`it.Motion=true` 时甚至换成「改回静态壁纸」，导致「云端生成」入口彻底消失；
+筛选条「有飘动视频」用同一个 `HasCloudVideo`，于是新图也被算进这一档。
+
+### 3. 修复：内容判定，不再按名字或时间猜
+
+- 新增 `app/VideoFingerprint.cs`，复用项目自带的 `app/MfVideo.cs`（Media Foundation
+  SourceReader）抽视频第一帧，**零新依赖、零联网**：
+  - 图片走 WPF `BitmapImage` → `WriteableBitmap`，视频首帧走 `MfVideo.Reader.NextFrame`；
+  - 两边都缩到 33×32 灰度 → z-score 归一化（消亮度/对比度差）+ 8×8 dHash（消压缩差）；
+  - 距离 = 归一化平均绝对差 MAD + 64 位汉明距离，**两个同时达标**才算同一画面；
+  - 按「路径 + mtime + size」缓存指纹，界面刷新不会反复解码。
+- `app/MfVideo.cs` 加 `Quiet` 开关，抽帧时静音 `[MF]` 诊断日志（播放器进程不受影响）；
+  `build.bat` 源码列表补 `VideoFingerprint MfVideo`。
+- `app/RelatedVideo.cs` 第 7 层删掉 `FromOrphans / JobCreatedFor / Epoch / StampRe / IsOrphan`
+  整套时间猜测，改成 `EnsureContentMap()`：
+  `KnownKeys` 排除名字已明确归属的片子 → 全库算「每张图 × 每段未归属视频」距离矩阵
+  → 按 MAD 升序贪心一对一分配（一段片子只归一张图）→ `ContentOwner()` 查表。
+  命中后**纯读直接播原文件**，不复制、不改名、不往壁纸库写文件。
+- **阈值用真实库标定**（`--contenttest` 输出的距离矩阵）：
+  同一画面 MAD `0.067 / 0.102 / 0.256`、hash `6 / 8 / 12`；
+  不同画面 MAD 最低 `0.781`（多数 > 0.9）、hash 最低 16 但 MAD 都 > 1.1。
+  取 `MaxMad=0.45`、`MaxHashDist=18`，正负之间留足安全带。
+  三段散片各自归回真正对应的图：
+  `02-18-26 → biliart-17403571-4`、`10-02-47 → biliart-17714251-4`、
+  `03-37-08 → biliart-10928886-9`；新图 `biliart-27606684-1` 判 **False**。
+  按名字明确归属的 1~6 层逻辑保持原样不变。
+
+### 4. 「云端生成」入口恢复 + 显式重新生成
+
+- 新增 `App.RegenCloud(it)`：弹确认说明「会再花一次钱、旧片留备份」→
+  `StartCloud(force)` → `QueueCloudGen(force)` → `CloudGen.Enqueue(force)`。
+  force 只跳过「有片就播」，**绝不跳过**「没配 API 不许写假工单」总闸；
+  `AskCloudConfig(it, regen, ...)` 文案区分「重新生成一片需要先配好」。
+  `Enqueue(force)` 先把旧片复制成 `.bak-regen-<时间戳>`，出片时覆盖规范路径；
+  `CloudGen.StateOf` 改为队列里有新单时优先报 `Queued`，避免重新生成后界面毫无变化。
+- `MainWindow.cs`：
+  - 右键菜单有片时同时给「云端动效：播放这段视频」和「✦ 重新生成一片（会重新计费）」；
+  - 大图预览按**有没有片**（而不是 `it.Motion`）决定第二按钮，有片时第三按钮是重新生成，
+    没片时第二按钮永远是「✦ 云端生成（3 秒）」，误标动态的图仍可从第三按钮回退静态；
+  - 预览 meta 不再对「标了动态但一片都没有」的图谎称「已设为动态播放」，
+    改成明确提示「标了动态但没找到片子（点「云端生成」）」；
+  - 顶栏「✦ 飘动视频」ToolTip 指明重新生成入口。
+- 筛选条「类型 → 有飘动视频」用同一套内容判定，`--searchtest` 实测
+  **静态 4/4、有飘动片 3/3**（新图不再被误算）。
+
+### 5. 自检与回归（全绿）
+
+新增 `--contenttest` **5/5 PASS**（正/负样本可区分、同图全认异图全不认、
+画面不匹配的图一律判无片、现场判定矩阵）；
+`--orphantest` 改用真实图片/视频只读复制到隔离库，**16/16 PASS**（含「画面不同的新图绝不被认领」）；
+`--clouddialogtest` **20/20 PASS**（新增取消重新生成、force 仍要配 API、不写工单不扣费）；
+`--relatedvideotest 56/56`、`--videotest 7/7`、`--importexporttest 11/11`、
+`--proxytest 9/9`、`--searchtest`（静态 4/4 有飘动片 3/3）、`--cloudcfgtest`、
+`--cloudflowtest`、`--menutest`、`--genapicheck`、`--uitest`、`--settingstest bottom` 全 PASS。
+`build.bat --noboot` 两个编译日志均 0 字节。
+
+**按权限边界跳过**：`--deltest / --greettest / --configtest / --arrivetest`
+（这四个会往真实库或真实配置写文件）。仓库外 74 个文件做前后快照对比，
+**差异 0 处**（内容连 mtime 都没变）；`TEMP/TMP` 全落在仓库内 `.selftest-tmp\`。
+
+### 6. 版本与待办
+
+`package.bat` / `docs/readme.txt` 升 **v0.9** 并重新打包。
+**需要主人授权的一件小事**：新图 `biliart-27606684-1` 在 `D:\Wallpaper\index.json` 里
+还留着上一版误写的 `motion=true / fx=2`（仓库外文件，未擅自改）。
+现在程序已按内容判定不播错片，界面也会提示「标了动态但没找到片子」并给
+「改回静态壁纸」按钮；要我把这条索引标记清成静态，说一声即可。
+远程仓库 URL 仍缺，未 push；真 Key 链路未碰。

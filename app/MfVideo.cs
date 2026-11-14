@@ -42,6 +42,12 @@ namespace WallpaperManager
 
         static bool mfStarted;
 
+        /// <summary>
+        /// 11-14：管理器进程会用这个解码器抽视频首帧做「内容指纹」比对。
+        /// 抽帧时把 [MF] 诊断日志静音，避免界面刷新把日志刷爆；播放器进程不受影响。
+        /// </summary>
+        internal static bool Quiet = false;
+
         [DllImport("mfplat.dll", ExactSpelling = true)]
         static extern int MFStartup(uint version, uint flags);
 
@@ -284,7 +290,7 @@ namespace WallpaperManager
                     int hr = MFCreateSourceReaderFromURL(c.Url, attrs, out sr);
                     if (hr < 0 || sr == null)
                     {
-                        Log.Note("[MF] 轮 " + (i + 1) + " " + c.Name + " → 建 reader 失败 0x" + hr.ToString("x8"));
+                        if (!Quiet) Log.Note("[MF] 轮 " + (i + 1) + " " + c.Name + " → 建 reader 失败 0x" + hr.ToString("x8"));
                         continue;
                     }
 
@@ -302,7 +308,7 @@ namespace WallpaperManager
                         Guid kSz = MF_MT_FRAME_SIZE;
                         ulong sz;
                         nat.GetUINT64(ref kSz, out sz);
-                        Log.Note("[MF]   原生 subtype=" + sub.ToString()
+                        if (!Quiet) Log.Note("[MF]   原生 subtype=" + sub.ToString()
                                  + " 尺寸 " + (int)(sz >> 32) + "x" + (int)(sz & 0xFFFFFFFFUL));
                         Marshal.ReleaseComObject(nat);
                     }
@@ -310,7 +316,7 @@ namespace WallpaperManager
                     hr = Configure(sr, c.Subtype);
                     if (hr < 0)
                     {
-                        Log.Note("[MF]   设定输出格式失败 0x" + hr.ToString("x8"));
+                        if (!Quiet) Log.Note("[MF]   设定输出格式失败 0x" + hr.ToString("x8"));
                         Marshal.ReleaseComObject(sr);
                         continue;
                     }
@@ -319,7 +325,7 @@ namespace WallpaperManager
                     hr = sr.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, out cur);
                     if (hr < 0 || cur == null)
                     {
-                        Log.Note("[MF]   读回当前格式失败 0x" + hr.ToString("x8"));
+                        if (!Quiet) Log.Note("[MF]   读回当前格式失败 0x" + hr.ToString("x8"));
                         Marshal.ReleaseComObject(sr);
                         continue;
                     }
@@ -343,12 +349,12 @@ namespace WallpaperManager
 
                     if (r.Width <= 0 || r.Height <= 0)
                     {
-                        Log.Note("[MF]   尺寸读不出来，换下一个配置");
+                        if (!Quiet) Log.Note("[MF]   尺寸读不出来，换下一个配置");
                         Marshal.ReleaseComObject(sr);
                         continue;
                     }
 
-                    Log.Note("[MF] ✔ 采用「" + c.Name + "」 " + r.Width + "x" + r.Height
+                    if (!Quiet) Log.Note("[MF] ✔ 采用「" + c.Name + "」 " + r.Width + "x" + r.Height
                              + " stride=" + r.Stride
                              + (r.IsNv12 ? "（解码器只给 NV12，本进程转 RGB）" : "（RGB32 直通）"));
                     return r;
@@ -419,7 +425,7 @@ namespace WallpaperManager
                 if (count > 1 && !warnedMultiBuffer)
                 {
                     warnedMultiBuffer = true;
-                    Log.Note("[MF] 注意：这一帧有 " + count + " 个缓冲，只取第一个");
+                    if (!Quiet) Log.Note("[MF] 注意：这一帧有 " + count + " 个缓冲，只取第一个");
                 }
 
                 IntPtr buf;

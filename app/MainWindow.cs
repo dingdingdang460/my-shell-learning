@@ -286,7 +286,9 @@ namespace WallpaperManager
             // 这里给它一个常驻按钮，作用于当前选中的那张图：有片就播，没片就下单。
             Button btnCloud = MakeButton("✦ 飘动视频");
             btnCloud.ToolTip = "给当前这张图生成一段 3 秒「头发 / 衣服自然飘」的短片。\n"
-                             + "已经有片子就直接播；还没有就下一单，生成好会自动换上，不用守着。";
+                             + "已经有片子就直接播；还没有就下一单，生成好会自动换上，不用守着。\n"
+                             + "想换一片：右键 →「重新生成一片」，或看大图时点第三个按钮。\n"
+                             + "没配好服务商 / API Key 会弹窗说清缺什么，不会假装在生成。";
             btnCloud.Background = new SolidColorBrush(Color.FromRgb(56, 46, 82));
             btnCloud.BorderBrush = new SolidColorBrush(Color.FromRgb(138, 112, 196));
             btnCloud.Foreground = new SolidColorBrush(Color.FromRgb(228, 217, 255));
@@ -2591,14 +2593,16 @@ namespace WallpaperManager
             if (it.Duration > 0) meta += " · " + FormatDuration((int)Math.Round(it.Duration));
             meta += " · " + Math.Round(it.Bytes / 1048576.0, 1) + "MB";
             if (it.IsVideo) meta += " · 动态视频（桌面播放引擎这版只做挂载验证）";
-            if (!it.IsVideo && it.Motion) meta += " · 已设为动态播放（" + App.FxName(it.Effect) + "）";
-            else if (!it.IsVideo)
+            else if (app.HasCloudVideo(it)) meta += " · 已配飘动视频，可播"
+                                                  + (it.Motion ? "（当前已设为动态）" : "");
+            else
             {
                 CloudGen.State st = CloudGen.StateOf(app.Config, it);
-                if (st == CloudGen.State.Ready) meta += " · 已配飘动视频，可播";
-                else if (st == CloudGen.State.Queued) meta += " · 云端生成中，好了会自动换上";
+                if (st == CloudGen.State.Queued) meta += " · 云端生成中，好了会自动换上";
                 else if (st == CloudGen.State.Manual) meta += " · 有一张不会自动出片的旧工单（可查看/删除）";
                 else if (st == CloudGen.State.Failed) meta += " · 上次生成失败了，可以重试";
+                // 11-14：新图被旧版误标成动态、其实一片都没有时，别再骗人「已设为动态播放」。
+                if (it.Motion) meta += " · 标了动态但没找到片子（点「云端生成」）";
             }
 
             PreviewData d = new PreviewData();
@@ -2617,22 +2621,27 @@ namespace WallpaperManager
                 d.PrimaryText = "设为壁纸";
                 d.OnPrimary = delegate { app.ApplyItem(cap); };
 
-                // 静态图：只剩「云端飘动视频」和「回退静态」两件事。
-                // 本机算法动效（场景/缩放）和本地导入都删了，动态只走云端生成的 3 秒真视频。
-                if (it.Motion)
-                {
-                    d.SecondText = "改回静态壁纸";
-                    d.OnSecond = delegate { app.ToggleMotion(cap); };
-                }
-                else if (app.HasCloudVideo(cap))
+                // 11-14 深夜：主人「云端生成功能按钮怎么没有了？」
+                // 旧版只要 it.Motion 就把第二按钮换成「改回静态」，有片时又换成「播放」，
+                // 结果「云端生成」整个入口都消失。现在按「有没有片」决定：
+                // 有片也保留「重新生成一片」，没片时误标的动态仍可从第三按钮退回静态。
+                bool hasVid = app.HasCloudVideo(cap);
+                if (hasVid)
                 {
                     d.SecondText = "▶ 播飘动视频";
                     d.OnSecond = delegate { app.SetMotionFx(cap, 2); };
+                    d.ThirdText = "✦ 重新生成一片";
+                    d.OnThird = delegate { app.RegenCloud(cap); };
                 }
                 else
                 {
                     d.SecondText = "✦ 云端生成（3 秒）";
                     d.OnSecond = delegate { app.GenCloud(cap); };
+                    if (cap.Motion)
+                    {
+                        d.ThirdText = "改回静态壁纸";
+                        d.OnThird = delegate { app.ToggleMotion(cap); };
+                    }
                 }
             }
             ShowPreview(d);
@@ -3031,12 +3040,19 @@ namespace WallpaperManager
                 bool hasVid = app.HasCloudVideo(it);
 
                 MenuItem mCloud = new MenuItem();
+                MenuItem mRegen = null;
                 if (hasVid)
                 {
                     mCloud.Header = "云端动效：播放这段视频";
                     mCloud.IsCheckable = true;
                     mCloud.IsChecked = it.Motion && it.Effect == 2;
                     mCloud.Click += delegate { app.SetMotionFx(it, 2); };
+
+                    // 11-14：有片不等于把「云端生成」入口删掉，给一个会先确认再花钱的重出通道。
+                    mRegen = new MenuItem();
+                    mRegen.Header = "✦ 重新生成一片（会重新计费）";
+                    mRegen.ToolTip = "已经有片子了，只有想换一片时才点；会先弹确认说明费用与所需配置。";
+                    mRegen.Click += delegate { app.RegenCloud(it); };
                 }
                 else if (cs == CloudGen.State.Manual)
                 {
@@ -3059,6 +3075,7 @@ namespace WallpaperManager
                 fxOff.Click += delegate { if (it.Motion) app.ToggleMotion(it); };
 
                 mDyn.Items.Add(mCloud);
+                if (mRegen != null) mDyn.Items.Add(mRegen);
                 mDyn.Items.Add(fxOff);
             }
 

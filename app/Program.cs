@@ -171,7 +171,8 @@ namespace WallpaperManager
                     || s.Equals("--videotest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--relatedvideotest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--orphantest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--clouddialogtest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--clouddialogtest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--contenttest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -681,6 +682,28 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --clouddialogtest：\r\n" + detail);
                         Log.Note("自检 --clouddialogtest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--contenttest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14 深夜：主人要求按画面区分「图片与视频是不是同一张」。
+                    // 只读真实库，输出正 / 负样本与散片距离矩阵，用来标定指纹阈值。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.ContentGuard(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --contenttest：\r\n" + detail);
+                        Log.Note("自检 --contenttest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -1728,12 +1751,62 @@ namespace WallpaperManager
         }
 
         /// <summary>
+        /// 11-14 深夜：主人「云端生成功能按钮怎么没有了？」
+        /// 有片时旧版把菜单 / 大图预览的入口整个换成「播放这段视频」，想重出一片就没地方点。
+        /// 这里给一个明确「会重新花钱」的独立入口：先弹确认，再走确认浮条 → StartCloud(force)。
+        /// force 只跳过「有片就播」那道闸，仍要过「没配 API 不许写假工单」的总闸。
+        /// </summary>
+        string forceRegenId = "";
+        internal static bool SelfTestNoRegenDialogs = false;
+        internal static MessageBoxResult SelfTestRegenAnswer = MessageBoxResult.No;
+        internal static string LastRegenDialog = "";
+        internal static int RegenDialogCount = 0;
+
+        public void RegenCloud(WallpaperItem it)
+        {
+            if (it == null) return;
+            string cur = VideoFor(it);
+            string body = "这张已经有飘动视频了，重新生成会再花一次钱。\r\n\r\n"
+                + "当前片子：" + (string.IsNullOrEmpty(cur) ? "（没找到）" : cur) + "\r\n\r\n"
+                + "确认后会走一遍完整下单流程；没配好服务商 / API Key 会弹窗说明缺什么，\r\n"
+                + "不会假装「生成中」，也不会偷偷扣费。\r\n"
+                + "旧片会保留一份 .bak-regen-* 备份，新片到货后自动换上。\r\n\r\n"
+                + "要继续吗？";
+            LastRegenDialog = body;
+            RegenDialogCount++;
+            MessageBoxResult r = SelfTestNoRegenDialogs
+                ? SelfTestRegenAnswer
+                : MessageBox.Show(body, "壁纸管家 · 重新生成飘动视频",
+                                  MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (r != MessageBoxResult.Yes)
+            {
+                if (win != null) win.SetStatus("已取消重新生成，现有片子保留");
+                return;
+            }
+
+            forceRegenId = it.Id;
+            if (win == null)
+            {
+                string msg;
+                QueueCloudGen(it, LocalImageFor(it), true, out msg);
+                return;
+            }
+            GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
+            bool ready = GenApi.Ready(Config);
+            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
+                    ? Config.GenSeconds : CloudGen.MaxSeconds;
+            win.CloudChoose(it.Id, it.Title, ready, p, Config.GenModel, Config.GenResolution, sec);
+            win.SetStatus("重新生成：确认后会重新计费，旧片先留 .bak-regen-* 备份");
+        }
+
+        /// <summary>
         /// 界面入口：点「云端生成」先亮出确认浮条 —— 用哪个模型、大概花多少钱、预计等多久。
         /// 确认按钮才调 StartCloud 真下单。没配好 Key 时浮条给「去设置」，不写工单、不假排队。
         /// 没有窗口（自检/后台调用）时保留原来的直接下单行为。
         ///
         /// 11-14 新增最前面这道闸：只要库里已经有跟这张图相关的视频，一律直接播，
         /// 连确认浮条都不弹 —— 主人的要求是不该让他再花一次钱。
+        /// 唯一例外：想主动重出一片时走 RegenCloud（会先确认再花钱）。
         /// </summary>
         public void GenCloud(WallpaperItem it)
         {
@@ -1765,10 +1838,15 @@ namespace WallpaperManager
         {
             WallpaperItem it = FindById(id);
             if (it == null) { if (win != null) win.SetStatus("这张已经不在库里了"); return; }
-            // 11-14：确认浮条亮着的时候，片子可能刚落到盘上（外部生成器 / 手工复制）。
+
+            // 11-14 深夜：主人在「重新生成」里明确确认过，这一单就是要重出一片，
+            // 不能再被「有片就播」拦回去；其余路径一律保持拦截。
+            bool force = string.Equals(forceRegenId, id, StringComparison.OrdinalIgnoreCase);
+            forceRegenId = "";
+            // 确认浮条亮着的时候，片子可能刚落到盘上（外部生成器 / 手工复制）。
             // 再拦一次：点了确认也不许重复提交一份要花钱的工单。
             string existing = VideoFor(it);
-            if (existing != null)
+            if (!force && existing != null)
             {
                 string useMsg;
                 UseExistingVideo(it, existing, out useMsg);
@@ -1779,7 +1857,7 @@ namespace WallpaperManager
             if (!string.IsNullOrEmpty(resolution)) Config.GenResolution = resolution;
             ConfigStore.Save(Config);
             string msg;
-            QueueCloudGen(it, LocalImageFor(it), out msg);
+            QueueCloudGen(it, LocalImageFor(it), force, out msg);
         }
 
         /// <summary>自检用：下单后清掉「到货自动换桌面」标记，避免测试片真把主人桌面换掉</summary>
@@ -1810,6 +1888,11 @@ namespace WallpaperManager
 
         bool AskCloudConfig(WallpaperItem it, out string msg)
         {
+            return AskCloudConfig(it, false, out msg);
+        }
+
+        bool AskCloudConfig(WallpaperItem it, bool regen, out string msg)
+        {
             GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
             StringBuilder miss = new StringBuilder();
             if (p == GenApi.Provider.None)
@@ -1819,7 +1902,8 @@ namespace WallpaperManager
             if (string.IsNullOrEmpty(Config.GenModel))
                 miss.Append("  · 模型：还没选（选好服务商会自动带出默认模型）\r\n");
 
-            string body = "这张还没有飘动视频。自动出片需要先配好：\r\n\r\n"
+            string body = (regen ? "重新生成一片需要先配好：\r\n\r\n"
+                                 : "这张还没有飘动视频。自动出片需要先配好：\r\n\r\n")
                 + miss.ToString() + "\r\n"
                 + "现在不会向任何服务商发请求，也不会扣费。\r\n"
                 + "可选两家：通义万相 wan2.6-i2v-flash（720P 约 ¥0.15/秒）、"
@@ -2355,25 +2439,37 @@ namespace WallpaperManager
         /// </summary>
         public bool QueueCloudGen(WallpaperItem it, string imagePath, out string msg)
         {
+            return QueueCloudGen(it, imagePath, false, out msg);
+        }
+
+        /// <summary>
+        /// force=true 只来自 RegenCloud（主人明确点了「重新生成一片」并确认过会再花钱）。
+        /// 它跳过「有片就播」，但绝不跳过「没配 API 不许写假工单」这道闸。
+        /// </summary>
+        public bool QueueCloudGen(WallpaperItem it, string imagePath, bool force, out string msg)
+        {
             if (it == null) { msg = "条目为空"; return false; }
             if (it.IsVideo) { msg = "这本来就是视频，不用生成"; return false; }
 
             // 11-14 总闸：任何想下单的路径最后都会到这里。只要库里已经有相关视频，
             // 直接播，绝不写工单、绝不拉起 RunApiJob、绝不向服务商发请求。
-            string existing = VideoFor(it);
-            if (existing != null)
+            if (!force)
             {
-                UseExistingVideo(it, existing, out msg);
-                return false;
+                string existing = VideoFor(it);
+                if (existing != null)
+                {
+                    UseExistingVideo(it, existing, out msg);
+                    return false;
+                }
             }
 
             // 11-14：没配好 API 就不许写工单、不许显示「生成中」。
-            // 这是总闸 —— 卡片「动态播放」、右键菜单、确认浮条、重试、后台调用全都会到这儿。
+            // 这是总闸 —— 卡片「动态播放」、右键菜单、确认浮条、重新生成、后台调用全都会到这儿。
             // 老逻辑在这里无条件写 JSON，可 GenApi.Ready=false 时没有任何线程会处理它，
             // 界面却切成「☁ 生成中」，主人以为在跑、其实要挂两天才超时。
             if (!GenApi.Ready(Config))
             {
-                AskCloudConfig(it, out msg);
+                AskCloudConfig(it, force, out msg);
                 if (win != null) win.SetStatus(msg);
                 return false;
             }
@@ -2381,7 +2477,7 @@ namespace WallpaperManager
             if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
                 imagePath = LocalImageFor(it);
 
-            bool ok = CloudGen.Enqueue(Config, it, imagePath, out msg);
+            bool ok = CloudGen.Enqueue(Config, it, imagePath, force, out msg);
             if (!ok)
             {
                 if (win != null)

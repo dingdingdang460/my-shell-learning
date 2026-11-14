@@ -20,14 +20,19 @@ namespace WallpaperManager
     ///   4) videos\ 下一级子目录里的同名视频；子目录名本身就是 id/图片 stem 时，里面任何视频
     ///   5) 图片自己所在目录、images\、thumbs\、库根下的同 stem 视频
     ///   6) jobs\{queue,done,fail} 工单里 out 字段指向的现存视频（id 或 image 对得上）
-    ///   7) 没带 id、但名字一看就是云端服务商原始出片（带 UTC 时间戳）的散片
-    ///      —— 11-14 主人实测「文件夹里明明有视频你还让我生成」就是这种；
-    ///         按这张图的下单时间就近认领，配不上就取最近出的一片，纯读不复制。
+    ///   7) 名字完全对不上的散片 —— **只有画面确实是同一张图才认**（见 VideoFingerprint）
     ///
     /// 1)~6) 找到但不在规范位置时，复制一份到 videos\&lt;id&gt;.mp4（原文件保留），
     /// 让 CloudGen.StateOf / SweepCloudJobs / 播放器这些只认规范路径的老逻辑都不用改。
-    /// 7) 是推断关联，只返回原路径直接播，绝不往壁纸库写任何文件；
-    /// 把对的片子改名成 &lt;id&gt;.mp4 放进 videos\ 就能覆盖它。
+    /// 7) 是内容判定：抽视频首帧与源图做归一化灰度 MAD + dHash 双比对，
+    ///    全库按距离升序贪心分配，一段片子只归一张图、一张图只拿一段片子；
+    ///    直接播原文件，不复制不改名不往壁纸库写任何文件。
+    ///
+    /// 11-14 深夜的重要教训：第 7 层最早是「按下单时间就近认领」，结果把 11-12
+    /// 别的壁纸的原始出片认给了 11-14 刚下载的新图，主人点「动态」就播到别的壁纸去了。
+    /// 主人明确要求：「不要就近认领……你要做到区分图片与视频是否为同一张图片背景」。
+    /// 所以时间、文件名、下单记录一概不作为归属证据，只认画面。
+    ///
     /// 名称匹配要求 id 后面跟分隔符，避免 &lt;id&gt; 误配到 &lt;id&gt;0 这种同前缀的别的壁纸。
     /// zz- 前缀是本项目自检假条目专用，不参与 7)，以免「到货」类自检被真实库散片误拦。
     /// </summary>
@@ -38,9 +43,14 @@ namespace WallpaperManager
         static DateTime CacheAt = DateTime.MinValue;
         static List<string> CacheFiles = new List<string>();
 
-        /// <summary>本进程内「哪份散片已经归给哪张图」，避免同一份被好几张图抢。</summary>
-        static readonly Dictionary<string, string> Claimed =
+        /// <summary>
+        /// 内容比对结果：图片 stem → 被认领的视频路径。签名（文件 mtime+size）变了才重算，
+        /// 界面每次刷新都会问一遍 HasCloudVideo，不能反复解码视频。
+        /// </summary>
+        static readonly Dictionary<string, string> ContentMap =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<string> ContentLogged = new HashSet<string>();
+        static string ContentSig = "\u0000none";
 
         /// <summary>自检会连续造/删文件，目录没变但内容变了，这时要手动让缓存失效。</summary>
         public static void Invalidate()
@@ -50,8 +60,11 @@ namespace WallpaperManager
                 CacheRoot = "";
                 CacheAt = DateTime.MinValue;
                 CacheFiles = new List<string>();
-                Claimed.Clear();
+                ContentMap.Clear();
+                ContentLogged.Clear();
+                ContentSig = "\u0000none";
             }
+            VideoFingerprint.Invalidate();
         }
 
         static bool IsVideoName(string name)
@@ -162,6 +175,13 @@ namespace WallpaperManager
             catch { return false; }
         }
 
+        static bool HasPath(List<string> list, string p)
+        {
+            for (int i = 0; i < list.Count; i++)
+                if (string.Equals(list[i], p, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
         static void AddFiles(List<string> outp, string dir)
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
@@ -169,7 +189,7 @@ namespace WallpaperManager
             {
                 string[] fs = Directory.GetFiles(dir, "*");
                 for (int i = 0; i < fs.Length; i++)
-                    if (IsVideoName(Path.GetFileName(fs[i]))) outp.Add(fs[i]);
+                    if (IsVideoName(Path.GetFileName(fs[i])) && !HasPath(outp, fs[i])) outp.Add(fs[i]);
             }
             catch { }
         }
@@ -315,14 +335,9 @@ namespace WallpaperManager
             return null;
         }
 
-        /// <summary>服务商原始出片的名字带 UTC 时间戳：..._2026-11-12T02-18-26.mp4。</summary>
-        static readonly System.Text.RegularExpressions.Regex StampRe =
-            new System.Text.RegularExpressions.Regex(@"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}");
-
         /// <summary>
         /// 「已知名字」全集：历史工单里的 id + 库里所有图片 stem。
-        /// 用它把「别的壁纸的片子」排除掉，只留下真正没人认领的原始出片。
-        /// 已删掉的壁纸，id 还在 jobs\done 的工单里，所以它的旧片不会被误认成孤儿。
+        /// 用它把「名字上已经明确归给某张图」的片子排除掉，只留下真正没人认领的散片。
         /// </summary>
         static List<string> KnownKeys(string libRoot)
         {
@@ -363,106 +378,164 @@ namespace WallpaperManager
             return k;
         }
 
-        /// <summary>
-        /// 只认「没带 id、但一看就是云端出片原始文件名」的散片。
-        /// 主人库里那几个 Anime_illustration_of_a_girl_w_2026-11-12T...mp4 就是这种；
-        /// 随便一个 totally-unrelated.mp4、或同前缀别的 id 的片子绝不能被误认。
-        /// </summary>
-        static bool IsOrphan(string file, List<string> known)
+        /// <summary>名字不匹配任何已知 id / 图片 stem 的视频，才需要靠画面认归属。</summary>
+        static List<string> UnownedVideos(string libRoot, List<string> files)
         {
-            string n = Path.GetFileName(file);
-            if (IsBackupName(n)) return false;
-            if (!StampRe.IsMatch(n)) return false;
-            for (int i = 0; i < known.Count; i++)
-                if (NameMatches(n, known[i])) return false;
-            return true;
-        }
-
-        static long Epoch(DateTime t)
-        {
-            try
+            List<string> known = KnownKeys(libRoot);
+            List<string> cand = new List<string>();
+            for (int i = 0; i < files.Count; i++)
             {
-                return (long)(t.ToUniversalTime()
-                    - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                string f = files[i];
+                if (!IsUnder(f, libRoot)) continue;
+                string n = Path.GetFileName(f);
+                if (IsBackupName(n)) continue;
+                bool owned = false;
+                for (int k = 0; k < known.Count; k++)
+                    if (NameMatches(n, known[k])) { owned = true; break; }
+                if (!owned && !HasPath(cand, f)) cand.Add(f);
             }
-            catch { return 0; }
+            return cand;
         }
 
-        /// <summary>这张图历次下单时间（取最近一次），用来跟原始出片时间就近配对。</summary>
-        static long JobCreatedFor(string id)
+        /// <summary>库里可当比对基准的图片：images\ 优先，其次库根，缩略图只补漏。</summary>
+        static List<string> Pictures(string libRoot)
         {
-            long best = 0;
-            string[] dirs = new string[] { CloudGen.QueueDir, CloudGen.DoneDir, CloudGen.FailDir };
+            List<string> p = new List<string>();
+            List<string> keys = new List<string>();
+            string[] dirs = new string[] {
+                Path.Combine(libRoot, "images"), libRoot, Path.Combine(libRoot, "thumbs")
+            };
             for (int d = 0; d < dirs.Length; d++)
             {
-                string p = Path.Combine(dirs[d], id + ".json");
-                if (!File.Exists(p)) continue;
+                if (!Directory.Exists(dirs[d])) continue;
+                string[] fs;
+                try { fs = Directory.GetFiles(dirs[d]); } catch { continue; }
+                for (int i = 0; i < fs.Length; i++)
+                {
+                    string n = Path.GetFileName(fs[i]).ToLowerInvariant();
+                    if (!(n.EndsWith(".jpg") || n.EndsWith(".jpeg") || n.EndsWith(".png")
+                       || n.EndsWith(".webp") || n.EndsWith(".bmp") || n.EndsWith(".gif"))) continue;
+                    string key = Stem(fs[i]).ToLowerInvariant();
+                    if (keys.Contains(key)) continue;
+                    keys.Add(key);
+                    p.Add(fs[i]);
+                }
+            }
+            return p;
+        }
+
+        static string Signature(List<string> files)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < files.Count; i++)
+            {
                 try
                 {
-                    Dictionary<string, object> o =
-                        Json.AsDict(Json.Parse(File.ReadAllText(p, Encoding.UTF8)));
-                    if (o == null) continue;
-                    object raw;
-                    if (o.TryGetValue("created", out raw))
-                    {
-                        long t = Convert.ToInt64(raw);
-                        if (t > best) best = t;
-                    }
+                    FileInfo fi = new FileInfo(files[i]);
+                    if (!fi.Exists) continue;
+                    sb.Append(files[i].ToLowerInvariant()).Append(':')
+                      .Append(fi.LastWriteTimeUtc.Ticks).Append(':')
+                      .Append(fi.Length).Append('|');
                 }
                 catch { }
             }
-            return best;
+            return sb.ToString();
+        }
+
+        sealed class Pair
+        {
+            public int Pic, Vid;
+            public double Mad;
+            public int Hash;
         }
 
         /// <summary>
-        /// 最后一层兜底：库里还躺着没带 id 的云端原始出片（服务商原名 + UTC 时间戳）。
-        /// 主人 11-14 实测「文件夹里明明有视频，你还要我生成」指的就是这几种。
-        /// 先按这张图的下单时间就近配对，配不上就取最近出的一片；
-        /// 一份散片本进程内只归一张图。宁可复用，绝不让他再花一次钱。
+        /// 第 7 层的核心：全库一次性算「每张图 × 每段未归属视频」的内容距离，
+        /// 按 MAD 升序贪心分配，一段片子只归一张图、一张图只拿一段片子。
+        /// 只有画面确实对得上（MAD 与 dHash 双阈值）才认，绝不按时间/名字猜。
         /// </summary>
-        static string FromOrphans(string libRoot, WallpaperItem it, List<string> files)
+        static void EnsureContentMap(string libRoot)
         {
-            List<string> known = KnownKeys(libRoot);
-            long t0 = JobCreatedFor(it.Id);
-            const long WindowBefore = 600;        // 出片最多比下单早 10 分钟（时钟误差）
-            const long WindowAfter = 12 * 3600;   // 排队 12 小时内回来都算这单
-
-            string best = null, newest = null;
-            long bestDelta = long.MaxValue;
-            DateTime newestTime = DateTime.MinValue;
+            List<string> files = BaseFiles(libRoot);
+            List<string> cand = UnownedVideos(libRoot, files);
+            List<string> pics = Pictures(libRoot);
+            string sig = Signature(pics) + "#" + Signature(cand);
 
             lock (Gate)
             {
-                for (int i = 0; i < files.Count; i++)
+                if (string.Equals(sig, ContentSig, StringComparison.Ordinal)) return;
+            }
+
+            VideoFingerprint.Fp[] pf = new VideoFingerprint.Fp[pics.Count];
+            VideoFingerprint.Fp[] vf = new VideoFingerprint.Fp[cand.Count];
+            for (int i = 0; i < pics.Count; i++) pf[i] = VideoFingerprint.Image(pics[i]);
+            for (int j = 0; j < cand.Count; j++) vf[j] = VideoFingerprint.Video(cand[j]);
+
+            List<Pair> pairs = new List<Pair>();
+            for (int i = 0; i < pics.Count; i++)
+                for (int j = 0; j < cand.Count; j++)
                 {
-                    string f = files[i];
-                    if (!IsOrphan(f, known)) continue;
-                    string owner;
-                    if (Claimed.TryGetValue(f, out owner)
-                        && !string.Equals(owner, it.Id, StringComparison.OrdinalIgnoreCase)) continue;
-
-                    DateTime mt;
-                    long len;
-                    try
+                    int hd;
+                    double mad = VideoFingerprint.Compare(pf[i], vf[j], out hd);
+                    if (VideoFingerprint.Same(mad, hd))
                     {
-                        FileInfo fi = new FileInfo(f);
-                        if (!fi.Exists) continue;
-                        mt = fi.LastWriteTimeUtc;
-                        len = fi.Length;
+                        Pair q = new Pair();
+                        q.Pic = i; q.Vid = j; q.Mad = mad; q.Hash = hd;
+                        pairs.Add(q);
                     }
-                    catch { continue; }
-                    if (len <= 0) continue;
+                }
+            pairs.Sort(delegate(Pair a, Pair b) { return a.Mad.CompareTo(b.Mad); });
 
-                    long ts = Epoch(mt);
-                    if (t0 > 0 && ts >= t0 - WindowBefore && ts <= t0 + WindowAfter)
-                    {
-                        long delta = Math.Abs(ts - t0);
-                        if (delta < bestDelta) { bestDelta = delta; best = f; }
-                    }
-                    if (newest == null || mt > newestTime) { newest = f; newestTime = mt; }
+            Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            bool[] usedP = new bool[pics.Count];
+            bool[] usedV = new bool[cand.Count];
+            StringBuilder detail = new StringBuilder();
+            for (int k = 0; k < pairs.Count; k++)
+            {
+                Pair q = pairs[k];
+                if (usedP[q.Pic] || usedV[q.Vid]) continue;
+                usedP[q.Pic] = true;
+                usedV[q.Vid] = true;
+                string key = Stem(pics[q.Pic]);
+                map[key] = cand[q.Vid];
+                detail.Append("  ").Append(key).Append(" ← ")
+                      .Append(Path.GetFileName(cand[q.Vid]))
+                      .Append("  MAD=").Append(q.Mad.ToString("0.000"))
+                      .Append(" hash=").Append(q.Hash).Append("\r\n");
+            }
+
+            lock (Gate)
+            {
+                ContentMap.Clear();
+                foreach (KeyValuePair<string, string> kv in map) ContentMap[kv.Key] = kv.Value;
+                ContentSig = sig;
+            }
+            Log.Note("飘动视频：内容比对 " + pics.Count + " 张图 × " + cand.Count
+                     + " 段未归属视频 → 认领 " + map.Count + " 对（画面不同的一律不认）"
+                     + (map.Count > 0 ? "\r\n" + detail.ToString().TrimEnd('\r', '\n') : ""));
+        }
+
+        /// <summary>这张图有没有「画面被确认是同一张」的散片。</summary>
+        static string ContentOwner(string libRoot, WallpaperItem it, string imagePath)
+        {
+            // zz- 是本项目所有自检假条目的前缀，别让它们吃真实库里的散片。
+            if (it.Id.StartsWith("zz-", StringComparison.OrdinalIgnoreCase)) return null;
+            try { EnsureContentMap(libRoot); }
+            catch (Exception ex)
+            {
+                Log.Note("!! 飘动视频内容比对失败：" + ex.Message);
+                return null;
+            }
+            List<string> keys = KeysOf(it, imagePath);
+            lock (Gate)
+            {
+                for (int i = 0; i < keys.Count; i++)
+                {
+                    string v;
+                    if (ContentMap.TryGetValue(keys[i], out v)) return v;
                 }
             }
-            return best != null ? best : newest;
+            return null;
         }
 
         static string FindSource(string libRoot, WallpaperItem it, string imagePath, out bool inferred)
@@ -479,23 +552,20 @@ namespace WallpaperManager
             if (best != null) return best;
             best = Newest(files, keys, false, true);            // 以图命名的关联文件夹
             if (best != null) return best;
-            best = FromJobs(libRoot, it, imagePath);            // 工单里写死的 out
+            best = FromJobs(libRoot, it, imagePath);           // 工单里写死的 out
             if (best != null) return best;
 
-            // zz- 是本项目所有自检假条目的前缀（--arrivetest / --cloudflowtest 等在真实库里
-            // 临时造的条目）。它们不该吃到主人库里的散片，否则「到货 / 下单」类自检会被误拦。
-            // 真壁纸不会叫这个前缀；新增的 --orphantest 用独立隔离库 + 非 zz- id 专测这一层。
-            if (!it.Id.StartsWith("zz-", StringComparison.OrdinalIgnoreCase))
-            {
-                best = FromOrphans(libRoot, it, files);         // 没带 id 的原始出片
-                if (best != null) { inferred = true; return best; }
-            }
+            // 第 7 层：名字完全对不上的散片，只有画面确实和这张图是同一张才认。
+            // 不再按下单时间「就近认领」—— 那样会把别的壁纸的片子播到新下载的图上。
+            best = ContentOwner(libRoot, it, imagePath);
+            if (best != null) { inferred = true; return best; }
             return null;
         }
 
         /// <summary>
         /// 返回可播的规范路径 videos\&lt;id&gt;.mp4；没有任何相关视频时返回 null。
         /// 找到的文件不在规范位置就复制一份过去（原文件保留），并写日志说明来源。
+        /// 内容判定命中的散片例外：直接播原文件，不复制、不改名、不往壁纸库写文件。
         /// </summary>
         public static string Find(string libRoot, WallpaperItem it, string imagePath)
         {
@@ -508,23 +578,20 @@ namespace WallpaperManager
             if (src == null) return null;
             if (string.Equals(src, canonical, StringComparison.OrdinalIgnoreCase)) return canonical;
 
-            // 推断关联的散片：直接播原文件，不复制、不改名、不往壁纸库写任何东西。
-            // 只在日志里说清楚来路，主人随时能把对的片子改名成 <id>.mp4 覆盖它。
+            // 内容比对确认同一画面的散片：直接播原文件，不动壁纸库。
             if (inferred)
             {
                 bool fresh;
                 lock (Gate)
                 {
-                    string owner;
-                    fresh = !Claimed.TryGetValue(src, out owner)
-                         || !string.Equals(owner, it.Id, StringComparison.OrdinalIgnoreCase);
-                    Claimed[src] = it.Id;
+                    string tag = it.Id + "|" + src;
+                    fresh = !ContentLogged.Contains(tag);
+                    if (fresh) ContentLogged.Add(tag);
                 }
-                // 界面刷新每秒会问好几次，日志只在第一次认领时写一行，别把日志刷爆。
+                // 界面刷新每秒会问好几次，日志只在第一次认领时写一行。
                 if (fresh)
-                    Log.Note("飘动视频：按库内未归属的原始出片推断关联 " + it.Id + " ← " + src
-                             + "（直接播原文件，不复制、不改动；若不是这张的片子，把对的片子改名成 "
-                             + it.Id + ".mp4 放进 videos\\ 即可）");
+                    Log.Note("飘动视频：内容比对确认同一画面 " + it.Id + " ← " + src
+                             + "（视频首帧与源图指纹匹配；直接播原文件，不复制、不改名）");
                 return src;
             }
 
