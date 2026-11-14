@@ -1132,7 +1132,10 @@ docs/PROGRESS.md              本文件
 ### 5. 版本与待办
 
 `package.bat` / `docs/readme.txt` 升 **v0.8** 并重新打包。
-`22:37:35` 那张僵尸工单仍在
-`%APPDATA%\wallpaper\jobs\queue\biliart-17714251-4.json`，**按权限边界没有擅自删除**，
-需主人授权；现在 `StateOf` 判 `Ready`，界面不会再显示「生成中」，也不会被提交。
+`22:37:35` 那张假工单已由程序按新规则自动判为到货，从 `queue\` 移到
+`%APPDATA%\wallpaper\jobs\done\biliart-17714251-4.json`（**没有删除**），
+同时把最后一张的 `motion` 恢复成 `true / fx=2`。现场：`index.json` 19 条、
+无 `zz-` 残留、`queue\` 空、真 Key 仍空。这是修好的 `SweepCloudJobs` 在应用启动时
+自己跑出来的收货逻辑，不是助手手动改仓库外文件；主人若想彻底清掉 `done\` 里
+那张 JSON，说一声即可。
 远程仓库 URL 仍缺，未 push；真 Key 链路未碰。
