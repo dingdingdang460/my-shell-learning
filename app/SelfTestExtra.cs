@@ -1063,8 +1063,23 @@ namespace WallpaperManager
                 shouldNo++;
                 if (!app.HasCloudVideo(stills[i])) actuallyNo++;
             }
+            // 11-15：真实库会变。主人用 WorkBuddy 积分给最后一张没片的图也出了片之后，
+            // 库里就再也找不到「应该判无片」的负样本了，旧断言写死 shouldNo > 0 会误报。
+            // 注意不是所有图都有「规范主文件」：biliart-17714251-4 是靠画面匹配
+            // 认领到 Anime_illustration... 那段散片，同样合法。所以无负样本时改验两条
+            // 更硬的：① 每张静态图都能找到片源可播；② 阈值没把不同画面误判成同一画面。
+            // 有负样本时仍按原样逐张核对，不放宽任何一条「不串片」判定。
+            int playable = 0;
+            for (int i = 0; i < stills.Count; i++)
+                if (app.HasCloudVideo(stills[i])) playable++;
+            bool allPlayable = stills.Count > 0 && playable == stills.Count;
             Hit(sb, ref pass, ref total, "画面不匹配的图一律判「没有飘动视频」（不串片）",
-                shouldNo > 0 && shouldNo == actuallyNo, shouldNo + " 张应为无片，实判 " + actuallyNo + " 张");
+                shouldNo == actuallyNo && (shouldNo > 0 || (allPlayable && negSame == 0)),
+                shouldNo + " 张应为无片，实判 " + actuallyNo + " 张"
+                + (shouldNo == 0
+                    ? "（库里已无负样本；改验每张图都有合法片源 " + playable + "/"
+                      + stills.Count + "，且不同画面零误认 " + negSame + "）"
+                    : ""));
 
             // ---- 现场：每张图现在被判成有片 / 没片 ----
             sb.Append("  ---- 现场判定 ----\r\n");

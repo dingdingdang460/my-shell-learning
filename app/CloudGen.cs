@@ -218,7 +218,11 @@ namespace WallpaperManager
             + "关于 Hy4 / Hy3：它们是 WorkBuddy 客户端的对话 / 推理模型（图片输入 + 思考模式），"
             + "只能看图、写字，生成不了 mp4；本程序是独立 exe，不共享 WorkBuddy 的模型额度或 API Key，"
             + "所以模型列表里只有两家的图生视频模型，不会列出它们 —— 选了也出不了片。\n"
-            + "想改成按秒付费：把「出片通道」切到「服务商 API Key」，填自己的百炼 / 方舟 Key 直连即可。";
+            + "想完全不打开 WorkBuddy 也能出片：把「出片通道」切到「服务商 API Key」，"
+            + "填自己的百炼 / 方舟 Key，程序自己直连提交、轮询、下载（按秒付费，"
+            + "720P 约 ¥0.45 / 3 秒）。积分通道依赖 WorkBuddy 客户端在运行"
+            + "（自动领单任务在客户端里跑）；客户端没开时工单会留着等，"
+            + "不会自动出片，也不会扣积分。";
 
         public const string BuddyMenuLabel = "⧉ 复制交给 WorkBuddy 的指令（不填 Key）";
         public const string BuddyMenuTip =

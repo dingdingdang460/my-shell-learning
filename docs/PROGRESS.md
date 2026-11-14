@@ -1381,3 +1381,40 @@ docs/PROGRESS.md              本文件
 `package.bat` / `docs/readme.txt` 升 **v0.9.2**，重新打包
 `dist\WallpaperManager-v0.9.2.zip`。待办不变：远程 URL、`index.json` 里
 新图误写的动效标记、`jobs\done\` 假工单、真 Key 链路，均按权限边界等主人授权。
+
+### 5. 11-15 追加：「不打开 WorkBuddy 也能出片吗」+ 真出一片验收
+
+主人再问：「以后使用我的壁纸软件，能不打开 WorkBuddy 也能图生视频吗？」
+并再次强调「直接做成完整可用的功能，而不是只给我一个页面和点击之后没有任何反应的按钮」。
+
+**结论（已写进软件，不再只停在口头）**
+- 用 WorkBuddy 积分：**不能**。积分绑定 WorkBuddy 客户端会话，自动领单是客户端里的
+  定时任务，独立 exe 拿不到会话凭证、也没法自己扣积分。客户端没开时待领工单会
+  留着，不自动出片、不扣积分。
+- 完全不打开 WorkBuddy：**能，但只能走按秒付费**。设置切成「服务商 API Key」
+  → 填自己的百炼 / 方舟 Key → 程序内直连「提交 → 轮询 → 下载」，
+  不依赖 WorkBuddy、不消耗积分（720P 约 ¥0.45 / 3 秒）。这条链路 v0.6 起就有。
+- 没有第三条路：除非 WorkBuddy 将来开放可供外部程序调用的视频生成 API / 可导出凭证。
+- 文案落点：`CloudGen.BuddyNote`（设置面板）、`StartBuddyGen` 三选弹窗、
+  `docs/readme.txt` 新增「不打开 WorkBuddy 也能出片吗」小节。
+
+**自动领单（主人明确授权后创建）**
+`automation_update` 建 `60ee3d44-64fb-4f24-8811-bc1d17f92f78`，
+「壁纸管家 · WorkBuddy 积分出片自动领单」，`FREQ=HOURLY;INTERVAL=1`、ACTIVE。
+每小时只读扫描 `%APPDATA%\wallpaper\jobs\buddy\*.json`；无单立即结束、不调用生成工具；
+有单按工单里的 image 作首帧出片、写到 out、确认落地才删工单；
+严禁改 index.json / queue / done / config.json、严禁调付费 API。
+
+**真出一片验收（消耗了 WorkBuddy 积分，主人已确认）**
+- 选图 `biliart-27606684-1`（新下载的静态图，`videos\` 下原本没有任何同名或变体片）。
+- 用 WorkBuddy 多模态图生视频（VideoGen，`image` = 源图首帧）生成飘动短片；
+  工具最短 4 秒（3 秒是程序下单侧上限，播放端不限时长），按 4 秒生成，
+  积分消耗约 40~80（授权口径 50~100 积分 / 5 秒）。
+- 产物 1,992,040 字节，按约定命名写入
+  `D:\Wallpaper\videos\biliart-27606684-1.mp4`（SHA256 与生成件一致）。
+  **这是本回合唯一新增的工作空间外文件**，按主人授权执行；
+  `index.json` / `config.json` / `jobs\queue` / `jobs\done` 一律未动。
+- `--searchtest` 输出「有飘动片 **4/4**」（此前 3/3），
+  内容比对仍「20 张图 × 3 段未归属视频 → 认领 3 对」且只确认
+  `biliart-17714251-4` 那一对 —— 新片按规范主文件名直接命中，
+  **没有把别的壁纸视频串到新图上**。程序可直接点开播放。
