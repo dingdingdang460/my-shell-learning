@@ -1,0 +1,45 @@
+# ============================================================
+# 壁纸管家 · 仓库只收「源码 + 文档 + 工具脚本 + 资源」
+#
+# 下面这些都是可以一条命令重建的产物，放进仓库只会让 clone 变慢：
+#   build.bat   -> app/bin/*.exe
+#   package.bat -> dist/
+#   各种自检/出片/截图 -> tools/out/、demo/、probe/
+# 项目原始体积约 678MB，排除后约 2MB。
+# ============================================================
+
+# --- 构建产物 ---
+app/bin/
+dist/
+*.exe
+*.new.exe
+*.zip
+*.log
+
+# --- 测试 / 诊断 / 演示产物（占项目体积 99%）---
+tools/out/
+demo/
+probe/
+demo-sea.mp4
+壁纸候选.html
+
+# --- 备份 / 缓存 ---
+*.bak
+*.bak-*
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+Thumbs.db
+
+# --- 本机运行数据 ---
+# 真实配置在 %APPDATA%\wallpaper\config.json，本来就不在项目里；
+# 这里挡的是误拷贝到项目里的配置或密钥。
+config.json
+*.env
+.env
+*.key
+*.pem
+
+# --- WorkBuddy 本地会话数据（保留在本机，不删除、不上传）---
+.workbuddy/

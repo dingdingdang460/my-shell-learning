@@ -1,0 +1,7 @@
+# Windows 批处理 / PowerShell 脚本必须是 CRLF。
+# cmd 按 ANSI 逐行读 bat，LF 行尾会让标签跳转和 goto 解析出错
+# （项目约定见 docs/PROGRESS.md 第一节「写代码必须遵守」）。
+# 只锁这几类脚本，其余文件交给 Git 自动判断，避免无谓地改动源码行尾。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
