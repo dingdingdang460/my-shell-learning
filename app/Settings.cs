@@ -79,6 +79,16 @@ namespace WallpaperManager
         // genCmd 只保留字段做老配置兼容，不再有 UI 入口、也不会被拉起（脚本路线已放弃）
         readonly TextBox genCmdBox = new TextBox();
         ScrollViewer scroller;
+        Button expBtn;                       // 导出/导入按钮：自检要能真实触发它们的 Click
+        Button impBtn;
+
+        // ---- 自检注入点：默认全部关闭，生产路径行为完全不变 ----
+        // --importexporttest 临时设这些静态字段，让「导出…/导入…」按钮走真实
+        // Click 处理器，但不弹系统文件对话框与 MessageBox（编辑器会抢前台）。
+        internal static string ExportPick = null;
+        internal static string ImportPick = null;
+        internal static bool SuppressDialogs = false;
+        internal static MessageBoxResult AutoAnswer = MessageBoxResult.OK;
 
         static readonly Brush TextMain = new SolidColorBrush(Color.FromRgb(232, 234, 240));
         static readonly Brush TextDim = new SolidColorBrush(Color.FromRgb(132, 138, 152));
@@ -242,13 +252,13 @@ namespace WallpaperManager
             cfgRow.Orientation = Orientation.Horizontal;
             cfgRow.Margin = new Thickness(0, 8, 0, 0);
 
-            Button exp = MakeButton("导出配置…");
-            exp.Click += delegate { ExportConfig(); };
-            Button imp = MakeButton("导入配置…");
-            imp.Margin = new Thickness(10, 0, 0, 0);
-            imp.Click += delegate { ImportConfig(); };
-            cfgRow.Children.Add(exp);
-            cfgRow.Children.Add(imp);
+            expBtn = MakeButton("导出配置…");
+            expBtn.Click += delegate { ExportConfig(); };
+            impBtn = MakeButton("导入配置…");
+            impBtn.Margin = new Thickness(10, 0, 0, 0);
+            impBtn.Click += delegate { ImportConfig(); };
+            cfgRow.Children.Add(expBtn);
+            cfgRow.Children.Add(impBtn);
             root.Children.Add(cfgRow);
 
             // ---------------- 云端生成（只走图生视频模型） ----------------
@@ -608,67 +618,125 @@ namespace WallpaperManager
         /// <summary>导出：先把当前内存里的配置落盘，再复制一份出去</summary>
         void ExportConfig()
         {
-            Microsoft.Win32.SaveFileDialog dlg = new Microsoft.Win32.SaveFileDialog();
-            dlg.Filter = "配置文件 (*.json)|*.json|所有文件 (*.*)|*.*";
-            dlg.FileName = "wallpaper-config.json";
-            if (dlg.ShowDialog() != true) return;
+            string target;
+            if (ExportPick != null)
+            {
+                target = ExportPick;
+            }
+            else
+            {
+                Microsoft.Win32.SaveFileDialog dlg = new Microsoft.Win32.SaveFileDialog();
+                dlg.Filter = "配置文件 (*.json)|*.json|所有文件 (*.*)|*.*";
+                dlg.FileName = "wallpaper-config.json";
+                if (dlg.ShowDialog() != true) return;
+                target = dlg.FileName;
+            }
             try
             {
                 ConfigStore.Save(app.Config);
-                File.Copy(ConfigStore.FilePath, dlg.FileName, true);
-                Log.Note("配置已导出：" + dlg.FileName);
-                MessageBox.Show("已导出到：\r\n" + dlg.FileName, "壁纸管家",
-                                MessageBoxButton.OK, MessageBoxImage.Information);
+                File.Copy(ConfigStore.FilePath, target, true);
+                Log.Note("配置已导出：" + target);
+                if (!SuppressDialogs)
+                    MessageBox.Show("已导出到：\r\n" + target, "壁纸管家",
+                                    MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("导出失败：" + ex.Message, "壁纸管家",
-                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                Log.Note("配置导出失败：" + ex.Message);
+                if (!SuppressDialogs)
+                    MessageBox.Show("导出失败：" + ex.Message, "壁纸管家",
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
 
+        // ---- 自检钩子：真实触发两个按钮的 Click（RaiseEvent 走同一个处理器）----
+        public void SelfTestExportClick()
+        {
+            expBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }
+
+        public void SelfTestImportClick()
+        {
+            impBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }
+
+        /// <summary>把界面输入框当前值吐出来，核对导入后有没有刷新</summary>
+        public string SelfTestFields()
+        {
+            return "interval=" + intervalBox.Text
+                 + " proxy=" + proxyBox.Text
+                 + " cache=" + cacheBox.Text
+                 + " lib=" + libBox.Text;
+        }
+
         /// <summary>
-        /// 导入：先校验 JSON 能解析，再覆盖 config.json 并重新读回来。
+        /// 导入：先校验是本程序的配置，再覆盖 config.json 并重新读回来。
         /// 覆盖前留一份 .bak —— 导入错文件时还能换回去，不至于把库路径弄丢。
         /// </summary>
         void ImportConfig()
         {
-            Microsoft.Win32.OpenFileDialog dlg = new Microsoft.Win32.OpenFileDialog();
-            dlg.Filter = "配置文件 (*.json)|*.json|所有文件 (*.*)|*.*";
-            if (dlg.ShowDialog() != true) return;
+            string source;
+            if (ImportPick != null)
+            {
+                source = ImportPick;
+            }
+            else
+            {
+                Microsoft.Win32.OpenFileDialog dlg = new Microsoft.Win32.OpenFileDialog();
+                dlg.Filter = "配置文件 (*.json)|*.json|所有文件 (*.*)|*.*";
+                if (dlg.ShowDialog() != true) return;
+                source = dlg.FileName;
+            }
 
             string text;
-            try { text = File.ReadAllText(dlg.FileName, System.Text.Encoding.UTF8); }
+            try { text = File.ReadAllText(source, System.Text.Encoding.UTF8); }
             catch (Exception ex)
             {
-                MessageBox.Show("读不了这个文件：" + ex.Message, "壁纸管家",
-                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                if (!SuppressDialogs)
+                    MessageBox.Show("读不了这个文件：" + ex.Message, "壁纸管家",
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            if (Json.AsDict(Json.Parse(text)) == null)
+            // 11-14 修：原来只判断「JSON 能不能解析」，两个真实问题：
+            //   ① 坏文件让 JavaScriptSerializer 直接抛异常，没人接 → 未处理异常；
+            //   ② {"a":1} 这种合法 JSON 会被接受，LoadFrom 把缺字段全填默认值，
+            //      库路径 / 代理 / 轮换等设置被静默清空。
+            // 现在要求解析成功且带非空 libRoot（ConfigStore.WriteTo 必定写它）。
+            bool valid = false;
+            try
             {
-                MessageBox.Show("这个文件不是壁纸管家的配置（JSON 解析不出来）。", "壁纸管家",
-                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                Dictionary<string, object> d = Json.AsDict(Json.Parse(text));
+                valid = d != null && Json.Str(d, "libRoot").Length > 0;
+            }
+            catch { valid = false; }
+            if (!valid)
+            {
+                if (!SuppressDialogs)
+                    MessageBox.Show("这个文件不是壁纸管家的配置（读不出 libRoot 字段）。", "壁纸管家",
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            MessageBoxResult r = MessageBox.Show(
-                "用这份配置覆盖当前设置？\r\n\r\n会改变库目录、轮换、代理等全部选项，"
-                + "旧配置会留一份 config.json.bak。",
-                "导入配置", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel);
+            MessageBoxResult r = SuppressDialogs
+                ? AutoAnswer
+                : MessageBox.Show(
+                    "用这份配置覆盖当前设置？\r\n\r\n会改变库目录、轮换、代理等全部选项，"
+                    + "旧配置会留一份 config.json.bak。",
+                    "导入配置", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel);
             if (r != MessageBoxResult.OK) return;
 
             try
             {
                 if (File.Exists(ConfigStore.FilePath))
                     File.Copy(ConfigStore.FilePath, ConfigStore.FilePath + ".bak", true);
-                File.Copy(dlg.FileName, ConfigStore.FilePath, true);
+                File.Copy(source, ConfigStore.FilePath, true);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("写入配置失败：" + ex.Message, "壁纸管家",
-                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                if (!SuppressDialogs)
+                    MessageBox.Show("写入配置失败：" + ex.Message, "壁纸管家",
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -677,7 +745,7 @@ namespace WallpaperManager
             Net.Configure(app.Config.Proxy);
             LoadFrom(app.Config);
             app.ApplySettings(!string.Equals(oldRoot, app.Config.LibRoot, StringComparison.OrdinalIgnoreCase));
-            Log.Note("配置已导入：" + dlg.FileName);
+            Log.Note("配置已导入：" + source);
             app.SetStatusSafe("已导入配置");
         }
 

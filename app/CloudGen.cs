@@ -128,13 +128,22 @@ namespace WallpaperManager
         /// <summary>
         /// 下单一单。返回 false 时 msg 说明原因（图片找不到 / 已经生成过了 / 写盘失败）。
         /// 已经排队或已有视频就不重复下单，避免主人连点几次花几份额度。
+        ///
+        /// 11-14：这里的「已有视频」扩成「有任何相关的视频」，由 RelatedVideo 统一判定，
+        /// 不再只看规范路径。写工单是花钱前的最后一步，这道闸必须留在这儿。
         /// </summary>
         public static bool Enqueue(AppConfig cfg, WallpaperItem it, string imagePath, out string msg)
         {
             if (it == null || string.IsNullOrEmpty(it.Id)) { msg = "条目为空"; return false; }
 
             string vid = VideoPath(cfg.LibRoot, it.Id);
-            if (File.Exists(vid)) { msg = "这张已经有云端视频了，直接用就行"; return false; }
+            string ready = RelatedVideo.Find(cfg.LibRoot, it, imagePath);
+            if (ready != null)
+            {
+                msg = "这张已经有相关视频了（" + System.IO.Path.GetFileName(ready)
+                    + "），直接播，不用重新生成";
+                return false;
+            }
 
             if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
             {
@@ -206,6 +215,9 @@ namespace WallpaperManager
         {
             if (it == null || string.IsNullOrEmpty(it.Id)) return State.None;
             if (File.Exists(VideoPath(cfg.LibRoot, it.Id))) return State.Ready;
+            // 11-14：备份 / 变体命名 / 关联子文件夹里的片子也算「已就绪」，
+            // 界面菜单才不会把「播放这段视频」错写成「云端生成（要花钱）」。
+            if (!it.IsVideo && RelatedVideo.Find(cfg.LibRoot, it, null) != null) return State.Ready;
             if (File.Exists(JobPath(it.Id))) return State.Queued;
             if (File.Exists(Path.Combine(FailDir, it.Id + ".json"))) return State.Failed;
             return State.None;

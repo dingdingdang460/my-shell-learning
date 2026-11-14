@@ -21,7 +21,7 @@ if not exist "%FW%\WPF\PresentationFramework.dll" goto :nowpf
 if not exist "app\bin" mkdir "app\bin"
 
 set "SRC="
-for %%f in (Program Models Json Desk WallpaperFit LibraryStore Greeting TagNames Online Bili Translate Log Settings Dynamic CloudGen GenApi GenModels MockCloud Http Pinyin ColorTag WelcomeGen MainWindow) do set "SRC=!SRC! app\%%f.cs"
+for %%f in (Program Models Json Desk WallpaperFit LibraryStore Greeting TagNames Online Bili Translate Log Settings Dynamic CloudGen RelatedVideo GenApi GenModels MockCloud MockProxy SelfTestExtra Http Pinyin ColorTag WelcomeGen MainWindow) do set "SRC=!SRC! app\%%f.cs"
 
 set "NEWEXE=app\bin\WallpaperManager.new.exe"
 if exist "%NEWEXE%" del /f /q "%NEWEXE%" >nul 2>&1
@@ -108,8 +108,9 @@ if exist "resources\app.ico" copy /y "resources\app.ico" "app\bin\resources\app.
 echo.
 echo Build OK --^> app\bin\WallpaperManager.exe
 if defined NOVIDEO echo NOTE: video mode was NOT compiled in (see build-player-video.log); probe still works
-echo Starting (自动开播库里第一个视频，验证动态壁纸)...
-start "" "app\bin\WallpaperManager.exe" --dynvideo
+rem --noboot: compile/exchange only, do not launch the GUI (used by CI / self-tests).
+if /i not "%~1"=="--noboot" echo Starting (auto-play first video to verify dynamic wallpaper)...
+if /i not "%~1"=="--noboot" start "" "app\bin\WallpaperManager.exe" --dynvideo
 exit /b 0
 
 :failplayerbusy

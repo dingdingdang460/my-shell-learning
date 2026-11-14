@@ -163,7 +163,11 @@ namespace WallpaperManager
                     || s.Equals("--uitest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--gencmdtest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--cloudcfgtest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--cloudflowtest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--cloudflowtest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--importexporttest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--proxytest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--videotest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--relatedvideotest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -588,6 +592,91 @@ namespace WallpaperManager
                     DispatcherTimer auto = new DispatcherTimer();
                     auto.Interval = TimeSpan.FromSeconds(2.5);
                     auto.Tick += delegate { auto.Stop(); RunCloudFlowTest(); };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--videotest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14：飘动视频主文件丢失但备份还在时，应用应自动恢复而不是让主人重新生成。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.VideoRecovery(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --videotest：\r\n" + detail);
+                        Log.Note("自检 --videotest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--relatedvideotest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14：主人说「只要关联文件夹里有相关视频就该播，别让我重新生成浪费钱」。
+                    // 这里在隔离目录里逐种摆法验证「有片 → 零工单、零 HTTP 提交、直接播」。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.RelatedVideoGuard(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --relatedvideotest：\r\n" + detail);
+                        Log.Note("自检 --relatedvideotest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--importexporttest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14：真点「导出配置…/导入配置…」按钮，验整条链路与零污染。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.ImportExport(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --importexporttest：\r\n" + detail);
+                        Log.Note("自检 --importexporttest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--proxytest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-14：代理不只验解析，让 HttpWebRequest / WebClient 真的经本机代理走一趟。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.Proxy(); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --proxytest：\r\n" + detail);
+                        Log.Note("自检 --proxytest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
                     auto.Start();
                     break;
                 }
@@ -1503,23 +1592,23 @@ namespace WallpaperManager
             string cloudVid = VideoFor(it);
             if (cloudVid != null) return Dynamic.Start(cloudVid, Config.DynamicFps, out err);
 
-            err = "这张还没生成飘动视频，先点「云端生成」";
+            err = "这张连相关的视频文件都没找到，才需要点「云端生成」";
             return false;
         }
 
         /// <summary>
-        /// 这张静态图有没有「云端生成的真·飘动视频」。
+        /// 这张静态图有没有「能直接播的相关视频」。
         ///
-        /// 约定：图片 images\xxx.jpg 对应 videos\&lt;id&gt;.mp4。应用不联网、不拿密钥，
-        /// 云端生成放在应用外面做（见 CloudGen.cs 的工单机制）：应用只负责下单和收货，
-        /// 生成好落到 videos\ 就自动生效。没有片子时桌面就停在这张静态图上，
-        /// 不再拿本机算法顶替（场景动效和缓慢缩放都已按主人要求删除）。
+        /// 11-14 之前只认 videos\&lt;id&gt;.mp4；后来补了 .mp4.bak* 自愈；主人明确说还不够：
+        /// 「只要关联的文件夹里有相关图片的视频就应该播放，而不是让我重新生成浪费钱」。
+        /// 现在统一交给 RelatedVideo 去找：主文件、备份、变体命名、关联子文件夹、
+        /// 图片同目录、工单 out 都算；找到不在规范位置的会自动归一到 videos\&lt;id&gt;.mp4。
+        /// 全程只读本机文件，零联网、零费用。
         /// </summary>
         string VideoFor(WallpaperItem it)
         {
             if (it == null || it.IsVideo || string.IsNullOrEmpty(it.Id)) return null;
-            string p = Path.Combine(Config.LibRoot, "videos", it.Id + ".mp4");
-            return File.Exists(p) ? p : null;
+            return RelatedVideo.Find(Config.LibRoot, it, LocalImageFor(it));
         }
 
         /// <summary>界面用：这张图有没有配好的云端飘动视频（决定菜单文案）</summary>
@@ -1594,10 +1683,20 @@ namespace WallpaperManager
         /// 界面入口：点「云端生成」先亮出确认浮条 —— 用哪个模型、大概花多少钱、预计等多久。
         /// 确认按钮才调 StartCloud 真下单。没配好 Key 时浮条给「去设置」，不写工单、不假排队。
         /// 没有窗口（自检/后台调用）时保留原来的直接下单行为。
+        ///
+        /// 11-14 新增最前面这道闸：只要库里已经有跟这张图相关的视频，一律直接播，
+        /// 连确认浮条都不弹 —— 主人的要求是不该让他再花一次钱。
         /// </summary>
         public void GenCloud(WallpaperItem it)
         {
             if (it == null) return;
+            string existing = VideoFor(it);
+            if (existing != null)
+            {
+                string useMsg;
+                UseExistingVideo(it, existing, out useMsg);
+                return;
+            }
             if (win == null)
             {
                 string msg;
@@ -1618,6 +1717,15 @@ namespace WallpaperManager
         {
             WallpaperItem it = FindById(id);
             if (it == null) { if (win != null) win.SetStatus("这张已经不在库里了"); return; }
+            // 11-14：确认浮条亮着的时候，片子可能刚落到盘上（外部生成器 / 手工复制）。
+            // 再拦一次：点了确认也不许重复提交一份要花钱的工单。
+            string existing = VideoFor(it);
+            if (existing != null)
+            {
+                string useMsg;
+                UseExistingVideo(it, existing, out useMsg);
+                return;
+            }
             GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
             Config.GenModel = GenModels.Resolve(p, modelId).Id;
             if (!string.IsNullOrEmpty(resolution)) Config.GenResolution = resolution;
@@ -1631,6 +1739,37 @@ namespace WallpaperManager
         {
             pendingApplyId = null;
             if (Config != null) { Config.PendingCloudId = ""; ConfigStore.Save(Config); }
+        }
+
+        /// <summary>
+        /// 11-14：自检要验「有片不下单」，但不能顺手把主人的桌面换成测试片。
+        /// 只在 --relatedvideotest 里打开，跑完 finally 一定还原。
+        /// </summary>
+        internal static bool SelfTestNoPlay = false;
+
+        /// <summary>
+        /// 统一的「已有相关视频」处理：记日志、状态栏说清楚、直接播，绝不进下单流程。
+        /// 所有能走到花钱那一步的入口（GenCloud / StartCloud / QueueCloudGen /
+        /// SetMotionFx / CloudGen.Enqueue）都先过这道闸。
+        /// </summary>
+        string UseExistingVideo(WallpaperItem it, string videoPath, out string msg)
+        {
+            string name = string.IsNullOrEmpty(videoPath) ? "" : Path.GetFileName(videoPath);
+            msg = "这张已经有相关视频了，直接播，不用重新生成（" + name + "）";
+            Log.Note("云端生成已拦截：" + it.Id + " → 复用现成视频 " + videoPath);
+
+            if (!SelfTestNoPlay)
+            {
+                // SetMotionFx 内部会写动效标记、真正开播并刷新列表。
+                try { SetMotionFx(it, 2); }
+                catch (Exception ex) { Log.Note("!! 复用现成视频后播放失败：" + ex.Message); }
+                if (win != null)
+                {
+                    try { win.SetStatus(msg); }
+                    catch { }
+                }
+            }
+            return videoPath;
         }
 
         /// <summary>
@@ -1757,12 +1896,18 @@ namespace WallpaperManager
                 if (File.Exists(job)) File.Delete(job);
 
                 WallpaperItem it = FindById(id);
-                if (it != null && !File.Exists(CloudGen.VideoPath(Config.LibRoot, id)))
+                // 11-14：以前只看规范主文件，主文件被移走/只剩备份时取消订单会把动效清成静态，
+                // 于是界面又变成「要重新生成」。现在按「有没有相关视频」来判断。
+                if (it != null && VideoFor(it) == null)
                 {
                     string err;
                     LibraryStore.SetMotion(id, Config.LibRoot, false, 0, out err);
                     it.Motion = false;
                     it.Effect = 0;
+                }
+                else if (it != null)
+                {
+                    Log.Note("云端生成：取消订单但保留动效标记（已有相关视频）" + id);
                 }
 
                 if (pendingApplyId == id) pendingApplyId = null;
@@ -1924,11 +2069,15 @@ namespace WallpaperManager
             try
             {
                 // ---- 0) 主人当前的状态：没填 Key。点击必须给明确引导，且绝不写假工单 ----
-                WallpaperItem real = null;
-                for (int i = 0; i < Items.Count; i++)
-                    if (!Items[i].IsVideo) { real = Items[i]; break; }
+                // 11-14：这一步必须挑一张「确实没有相关视频」的条目。库里那几张静态图
+                // 现在都有片子了，拿它们会被「有片就播」的总闸拦下 —— 那是正确行为，
+                // 但不是这条要测的分支，所以用一个只存在于内存里的假 id。
+                WallpaperItem real = new WallpaperItem();
+                real.Id = "zz-cloudflow-nokey";
+                real.Title = "未配 Key 的测试条目";
+                real.File = "images/zz-cloudflow-nokey.jpg";
                 int jobsBefore = CloudGen.PendingCount();
-                if (real != null && win != null)
+                if (win != null)
                 {
                     GenCloud(real);
                     string nk = win.SelfTestCloudState();
@@ -1943,7 +2092,7 @@ namespace WallpaperManager
                 }
                 else
                 {
-                    Log.Note("自检 --cloudflowtest：未配 Key 分支 × 库里没有静态图或无窗口");
+                    Log.Note("自检 --cloudflowtest：未配 Key 分支 × 无窗口");
                 }
 
                 tmp = Path.Combine(Path.GetTempPath(), "wallpaper-cloudflow-" + Environment.TickCount);
@@ -2089,6 +2238,15 @@ namespace WallpaperManager
             if (it == null) { msg = "条目为空"; return false; }
             if (it.IsVideo) { msg = "这本来就是视频，不用生成"; return false; }
 
+            // 11-14 总闸：任何想下单的路径最后都会到这里。只要库里已经有相关视频，
+            // 直接播，绝不写工单、绝不拉起 RunApiJob、绝不向服务商发请求。
+            string existing = VideoFor(it);
+            if (existing != null)
+            {
+                UseExistingVideo(it, existing, out msg);
+                return false;
+            }
+
             if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
                 imagePath = LocalImageFor(it);
 
@@ -2151,6 +2309,14 @@ namespace WallpaperManager
         /// </summary>
         void RunApiJob(string id, string imagePath)
         {
+            // 11-14 最后一道闸：真正会掏钱的是下面的 GenApi.Submit。
+            // 万一有别的代码绕过了 QueueCloudGen，发请求之前再看一眼有没有现成片子。
+            WallpaperItem guardItem = FindById(id);
+            if (guardItem != null && VideoFor(guardItem) != null)
+            {
+                Log.Note("!! 云端(API) 已拦截：这张已有相关视频，绝不重复提交 " + id);
+                return;
+            }
             string job = CloudGen.JobPath(id);
             int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
                       ? Config.GenSeconds : CloudGen.MaxSeconds;
@@ -2257,6 +2423,14 @@ namespace WallpaperManager
                     if (!CloudGen.ReadJob(jobs[i], out id, out image, out sec, out created)) continue;
 
                     string vid = CloudGen.VideoPath(Config.LibRoot, id);
+                    if (!File.Exists(vid))
+                    {
+                        // 11-14：片子落在别的名字 / _raw 之类的子文件夹时也算是到货，
+                        // VideoFor 会把它归一到规范路径，工单不用白挂着等超时。
+                        WallpaperItem pending = FindById(id);
+                        if (pending != null && VideoFor(pending) != null)
+                            vid = CloudGen.VideoPath(Config.LibRoot, id);
+                    }
                     if (File.Exists(vid))
                     {
                         CloudGen.MarkDone(jobs[i], id);

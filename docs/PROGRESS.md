@@ -896,3 +896,161 @@ docs/REQUIREMENTS.md          需求文档 v0.2
 docs/readme.txt               打包随附的使用说明
 docs/PROGRESS.md              本文件
 ```
+
+## 十五、11-14：纳入版本控制 + 三项收口
+
+### 1. Git 与「仓库瘦身」（主人指定：后续开发按标准流程）
+
+- 项目原本没有 .git。新建 `main` 分支，身份沿用全局 Yan / 2389368803@qq.com。
+- 本机 678MB / 923 个文件，99% 是可重建产物。**仓库只收源码 / 文档 / 工具 / 资源：82 个文件、1.06MB**。
+- `.gitignore` 排除 `tools/out`、`demo`、`probe`、`dist`、`app/bin`、`*.log`、`*.bak-*`、`.workbuddy`；
+  `.gitattributes` 锁 `*.bat / *.cmd / *.ps1` 为 CRLF（cmd 按 ANSI 读，LF 会让标签跳转解析出错）。
+- **本机文件一个没少**：两个 exe、`app/bin/resources/` 三件套、618MB 产物全部保留。
+  清掉的只有 `demo/`、根目录两个一次性大文件、4 个构建日志、`probe/` 里 32 个诊断截图；
+  `tools/out` 未动。`build.bat` / `package.bat` 只依赖 `app/*.cs` + `resources/*` + `docs/readme.txt`。
+- `build.bat --noboot`：只编译替换、不弹 GUI、不抢桌面，供 CI / 自检用；双击默认行为不变。
+  **bat 不能带 BOM** —— cmd 会把 BOM 当成命令，导致第一行报错且 `@echo off` 失效、整份回显。
+
+### 2. 导入/导出按钮：真实点击验证（`--importexporttest` 11/11 PASS）
+
+交接第 9 节第 1 项。设置页两个按钮以前只验过 `WriteTo` / `LoadFrom` 往返，系统文件对话框从没点过。
+现在加自检注入点（默认关闭、生产行为不变），`RaiseEvent` 真点 Click 处理器，验证：
+导出落盘 → 覆盖前留 `.bak` → 新配置读回 → `Net.Configure` 同步 → 界面输入框刷新 →
+点取消不覆盖 → 坏文件不抛异常 → 零污染（真实 `config.json` 逐字节未变）。
+
+**顺带修掉两个真实缺陷**（`app/Settings.cs` 的 `ImportConfig`）：
+1. 坏文件让 `JavaScriptSerializer` 直接抛异常，原来没人接 → 未处理异常；
+2. `{"a":1}` 这类合法 JSON 会被接受，`LoadFrom` 把缺字段全填默认值 →
+   库路径 / 代理 / 轮换等设置被静默清空。现在要求解析成功且带非空 `libRoot`
+   （`ConfigStore.WriteTo` 必定写它）。
+
+### 3. 代理真实链路（`--proxytest` 9/9 PASS）
+
+交接第 9 节第 2 项。新增 `app/MockProxy.cs`（本机 TCP 代理，零外部流量、零费用），
+让应用内 `HttpWebRequest` / `WebClient` 真的经代理走一趟：
+- 代理收到绝对 URI 请求行 `GET http://wallpaper-proxy-check.invalid/probe HTTP/1.1`（走代理的客观证据）；
+- `Host` 指向目标域名；`WebClient`（`GenApi.Download` 那条路）同样走代理；
+- 本机 `127.0.0.1` 绕过代理（`BypassProxyOnLocal`），`--cloudflowtest` 的模拟服务端不受影响；
+- 空配置直连、代理零请求、`Net.Proxy == null`（老行为红线）。
+
+### 4. 「最后一张壁纸有视频却要我生成」—— 根因与修复
+
+日志实锤：21:39:49 播放器重开解码器报 `0x80070002`（文件不存在），6 种打开方式全失败；
+21:40 下单时 `CloudGen.Enqueue` 才会放行（它见到主文件已不在），21:40:12 取消时
+`CancelCloud` 又把这条的 `motion/fx` 清成静态 → 于是变成「要重新生成」。
+`LibraryStore.Delete` / `Program.DeleteItem` 都**不碰** `videos\`，不是删 `biliart-10096573-7` 误删的；
+主文件是在播放途中被外部移走 / 删除的。应用只认精确的 `videos\<id>.mp4`，
+主人看到的 `.bak` / `.bak-v2` 它一律不认 —— 这才是「文件夹里有视频」的误会来源。
+
+**修复**：
+- `Program.VideoFor` 加自愈：主文件缺失时找 `<id>.mp4.bak*`，取 mtime 最新的一份
+  `File.Copy` 回主文件（备份保留）并写日志。新增 `--videotest`（7/7 PASS，隔离临时库）。
+- 真实库已自动恢复 `biliart-17714251-4.mp4`（3 秒 / 466KB，来自 `.bak-v2`），
+  `--searchtest` 的「有飘动片」从 2/2 回到 **3/3**。
+- `index.json` 里该条的 `motion` / `fx` 恢复成 `true / 2`（21:39 主人的选择），
+  原文件备份为 `D://Wallpaper//index.json.bak-20261114-videofix`。
+
+### 5. 回归（全绿）
+
+`build.bat --noboot` 零输出；`--searchtest` / `--greettest` / `--deltest` / `--configtest` /
+`--cloudcfgtest` / `--cloudflowtest` / `--arrivetest` 全 PASS，`--genapicheck` / `--uitest` /
+`--settingstest bottom` 照常出图；新增 `--importexporttest` / `--proxytest` / `--videotest` 全 PASS。
+库 `index.json` 19 条（主人 21:38 删了 `biliart-10096573-7`，界面含散图共 20 张）、
+无 `zz-` 残留、队列空、真实 config 未改。
+`--cloudtest` 仍未跑：它会往真实队列写一张 2 天超时的死工单，没有真实出片通道时跑了只留垃圾。
+
+### 6. 新增 / 改动文件
+
+`app/MockProxy.cs`、`app/SelfTestExtra.cs`（新）；`app/Program.cs`（三个自检分发、`VideoFor` 自愈）、
+`app/Settings.cs`（按钮字段 / 注入点 / 导入校验）、`build.bat`（编译列表 + `--noboot`）、
+`.gitignore` / `.gitattributes`（新，已在初始提交）、`docs/readme.txt`、`package.bat`、`docs/PROGRESS.md`。
+
+### 7. 下次先看
+
+1. 远程仓库地址还没定（GitHub 账号 `dingdingdang460` 下无公开仓库）；本地提交已完成，
+   拿到 URL 后 `git remote add origin <url>` + `git push -u origin main` 即可。
+2. 真 Key 链路仍未验证（本机没填服务商 / Key，涉及额度，不代填）。
+3. `--cloudtest`（会写真实工单）、4K / 多屏、循环首尾 ping-pong、
+   断点续传 / yt-dlp 侧车 / 时间段轮换 / 锁屏同步，未动。
+
+---
+
+## 十六、11-14 续：相关视频「一律复用，绝不重新花钱」
+
+### 1. 主人的要求
+
+> 「这个问题要修复下，只要的关联的文件夹里有相关图片的视频就应该播放，
+> 而不是让我重新生成浪费钱」
+
+上一节做的 `.bak*` 自愈只是特例。主人要的是**通用规则**：库里只要存在跟这张图
+有关的片子，就直接播；任何情况下都不许因此再下一次单、再花一次额度。
+
+### 2. 新增 `app/RelatedVideo.cs`：统一发现器
+
+只读本机文件、零联网、零费用，按优先级找：
+
+| # | 摆法 | 例子 |
+|---|------|------|
+| 1 | 规范主文件 | `videos\<id>.mp4` |
+| 2 | 旧片备份 | `videos\<id>.mp4.bak` / `.bak-v2` |
+| 3 | 以 id / 图片 stem 开头的变体 | `<id>.raw.mp4`、`<id>-v2.mp4`、`<id>.mp4.part` |
+| 4 | `videos\` 下一级关联子文件夹 | `videos\_raw\<id>.raw.mp4`；文件夹本身以图命名时，里面**任何**片子都算 |
+| 5 | 图片同目录 / `images\` / `thumbs\` / 库根 | 跟图片同 stem 的 mp4 |
+| 6 | 云端工单 `out` 字段 | `jobs\{queue,done,fail}` 里 id 或 image 对得上、且 out 还在库内的片子 |
+
+- 名称匹配要求 id 后面跟分隔符（`. - _ 空格 ( [`），避免 `<id>` 误吃到 `<id>0` 这种别的壁纸。
+- **只在当前 LibRoot 范围内认片子**：换库 / 自检用临时库时不会把上一个库的视频串进来。
+- 找到但不在规范位置时，`File.Copy` 一份到 `videos\<id>.mp4`（原文件保留、日志写明来源），
+  这样 `CloudGen.StateOf` / `SweepCloudJobs` / 播放器这些只认规范路径的老逻辑一行都不用改。
+- 目录清单带 2 秒缓存 + `Invalidate()`，界面每次刷新问 19 张图不会反复扫盘。
+- **认不出的边界**：文件名跟图片毫无关系、又没有工单记录的散片（库里那两个
+  `Anime_illustration_of_a_girl_w_*.mp4` 就是），程序没法判断它属于哪张图。
+  改名为 `<id>*.mp4` 或放进 `videos\<id>\` 即可，不必重新生成。说明已写进随包 readme。
+
+### 3. 下单前的四道闸（花钱的是 `GenApi.Submit`）
+
+`app/Program.cs` / `app/CloudGen.cs` 全部收口：
+
+1. `GenCloud` —— 有片直接 `SetMotionFx(it,2)` 播放，**连确认下单浮条都不弹**；
+2. `StartCloud` —— 浮条亮着时片子才落盘（外部生成器 / 手工复制）也不会重复提交；
+3. `QueueCloudGen` —— 所有下单路径的汇聚点，先查 `VideoFor`，有片返回 false 并复用；
+4. `CloudGen.Enqueue` —— 写工单前最后一道；`RunApiJob` 开头再加一道兜底，
+   真要 POST 之前再看一眼有没有现成片子。
+
+配套：`CloudGen.StateOf` 也按「有没有相关视频」判定，菜单才会显示
+「云端动效：播放这段视频」而不是「云端生成动效视频（3 秒）」；
+`CancelCloud` 不再因为主文件缺失就把动效标记清回静态；
+`SweepCloudJobs` 会把落在别处的片子认作到货，工单不白挂到超时。
+`--cloudflowtest` 第 0 步改用内存里的假 id（真库里的静态图现在都有片子了），
+保住「没配 Key → 去设置、不写假工单」这条断言。
+
+### 4. `--relatedvideotest`：56/56 PASS，零下单、零费用
+
+隔离：`ConfigStore.DirOverride` + `LibRoot` 指向临时目录 + `App.SelfTestNoPlay`（不换桌面）。
+**反证设计**：故意把服务商 / 假 Key 配好、把 `GenApi.EndpointOverride` 指到本机
+`MockCloudServer`，所以只要任何一道闸漏了，`RunApiJob` 就会真的 POST 一次。
+断言 7 种摆法下：认得出 → 归一到规范主文件且内容一致 → 三个下单入口全拒绝 →
+工单队列没被写 → `mock.SubmitCount` 恒为 0 → 没弹确认浮条 → `StateOf=Ready`。
+再验两条反例：无关视频 / 同前缀别的 id 不误认；**完全没有相关视频时才允许下单**。
+收尾验真实 `index.json` 逐字节未变、真实队列数量不变、配置与端点全部还原。
+
+### 5. 回归（全绿）
+
+`build.bat --noboot` 编译零输出（`build.log` / `build-player.log` 均 0 字节）；
+`--relatedvideotest 56/56`、`--videotest 7/7`、`--importexporttest 11/11`、
+`--proxytest 9/9`、`--searchtest`（有飘动片 3/3）、`--greettest 19/19`、
+`--deltest`、`--configtest`、`--cloudcfgtest`、`--cloudflowtest 13 项`、
+`--arrivetest`、`--menutest`、`--genapicheck`、`--uitest`、`--settingstest bottom` 全 PASS。
+现场：真实库 19 条、无 `zz-` 残留、队列空、临时目录 0 个、真 Key 仍为空。
+最后一张 `biliart-17714251-4.mp4`（466KB）在盘、`motion=true / fx=2`。
+
+### 6. 版本与改动文件
+
+`package.bat` / `docs/readme.txt` 升到 **v0.7**，重新打包
+`dist\WallpaperManager-v0.7\`（`dist/` 仍被 `.gitignore` 排除，只留本机）。
+
+本轮新增 `app/RelatedVideo.cs`；改动 `app/Program.cs`（VideoFor 换实现、
+四道闸、CancelCloud、SweepCloudJobs、自检分发）、`app/CloudGen.cs`（Enqueue / StateOf）、
+`app/SelfTestExtra.cs`（RelatedVideoGuard + 复用 VideoRecovery 的缓存失效）、
+`build.bat`（编译列表）、`docs/readme.txt`、`docs/PROGRESS.md`、`package.bat`。
+按主人确认的标准流程整体纳入版本控制并编译自检通过后提交。

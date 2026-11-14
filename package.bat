@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 rem ============================================================
 rem  Package: turn app\bin into a portable folder + zip
-rem  Output: dist\WallpaperManager-v0.5\ and .zip
+rem  Output: dist\WallpaperManager-v0.7\ and .zip
 rem  No admin rights, no registry writes.
 rem
 rem  11-13: cloud generation goes straight to the model API (Wanx / Ark)
@@ -13,7 +13,7 @@ rem  tools\gen-motion.* is no longer shipped. Target machines need
 rem  neither Python nor numpy / Pillow, just an API Key in Settings.
 rem ============================================================
 
-set "VER=v0.5"
+set "VER=v0.7"
 set "DST=dist\WallpaperManager-%VER%"
 
 if not exist "app\bin\WallpaperManager.exe" goto :nobuild
