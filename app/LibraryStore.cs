@@ -500,9 +500,36 @@ namespace WallpaperManager
             get
             {
                 if (!string.IsNullOrEmpty(DirOverride)) return DirOverride;
+                string custom = CustomRoot();
+                if (custom.Length > 0) return custom;
                 return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "wallpaper");
             }
         }
+
+        /// <summary>
+        /// 数据目录可以搬出 C 盘：在程序所在目录放一个 data-root.txt，
+        /// 里面写一行目标目录（例如 D:\...\wallpaper\appdata），配置、工单、欢迎语就都落到那里。
+        ///
+        /// 没有这个文件时行为与以前一模一样（%APPDATA%\wallpaper），老配置和分发包完全无感。
+        /// 目标目录必须真实存在：写错、盘没插、目录被删，一律退回默认位置，
+        /// 不会让程序在某个不存在的地方重新生成一份空配置、把主人的设置丢掉。
+        /// </summary>
+        static string CustomRoot()
+        {
+            try
+            {
+                string marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data-root.txt");
+                if (!File.Exists(marker)) return "";
+                string s = File.ReadAllText(marker).Trim().Trim('"');
+                if (s.Length == 0) return "";
+                if (!Directory.Exists(s)) return "";
+                return s;
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>数据目录当前是不是被搬过（设置页与日志用来说明落点）。</summary>
+        public static bool Relocated { get { return CustomRoot().Length > 0; } }
 
         public static string FilePath
         {

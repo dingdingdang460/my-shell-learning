@@ -137,6 +137,9 @@ namespace WallpaperManager
             Greeting.Load(ResourcesDir);
 
             Config = ConfigStore.Load();
+            // 数据目录落点必须能自查：搬过盘与没搬过，日志里一眼能分出来。
+            Log.Note("数据目录：" + ConfigStore.Dir
+                     + (ConfigStore.Relocated ? "（已按 data-root.txt 迁出默认位置）" : "（默认 %APPDATA%\\wallpaper）"));
             // 代理：空 = 直连（和以前完全一致）；填了就走代理。所有联网点都读这一处。
             if (!Net.Configure(Config.Proxy)) Log.Note("代理地址解析失败，已退回直连：" + Config.Proxy);
             else if (Net.Current.Length > 0) Log.Note("网络代理：" + Net.Current);

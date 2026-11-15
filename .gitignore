@@ -46,3 +46,7 @@ config.json
 
 # --- 自检隔离临时目录：TEMP/TMP 重定向到这里，跑自检不碰仓库外文件 ---
 .selftest-tmp/
+
+# --- 程序运行数据（配置 / 工单 / 欢迎语自动记录）：从 %APPDATA% 迁到本机后放这里 ---
+# 里面有 config.json（可能含 API Key）与 jobs 队列，绝不能进版本库。
+appdata/
