@@ -558,6 +558,7 @@ namespace WallpaperManager
                 // 11-15：老配置没有 genChannel → 默认「优先 WorkBuddy 积分」
                 string chan = Json.Str(d, "genChannel");
                 c.GenChannel = (chan == "api" || chan == "buddy") ? chan : "buddy";
+                c.BuddyExe = Json.Str(d, "buddyExe");
 
                 // 功耗守卫：老配置里没有这两个键 → 默认「电池供电时暂停」+ 20% 阈值
                 c.Proxy = Json.Str(d, "proxy");
@@ -601,6 +602,7 @@ namespace WallpaperManager
                 sb.Append("  \"genModel\": ").Append(Json.Quote(c.GenModel)).Append(",\r\n");
                 sb.Append("  \"genResolution\": ").Append(Json.Quote(c.GenResolution)).Append(",\r\n");
                 sb.Append("  \"genChannel\": ").Append(Json.Quote(c.GenChannel)).Append(",\r\n");
+                sb.Append("  \"buddyExe\": ").Append(Json.Quote(c.BuddyExe)).Append(",\r\n");
                 sb.Append("  \"proxy\": ").Append(Json.Quote(c.Proxy)).Append(",\r\n");
                 sb.Append("  \"cacheLimitMb\": ").Append(c.CacheLimitMb).Append("\r\n");
                 sb.Append("}\r\n");

@@ -91,15 +91,23 @@ namespace WallpaperManager
                 s.Append("  \"created\": ").Append(Now()).Append(",\r\n");
                 s.Append("  \"channel\": ").Append(Json.Quote("workbuddy-credits")).Append(",\r\n");
                 s.Append("  \"status\": ").Append(Json.Quote("waiting-for-workbuddy")).Append(",\r\n");
+                // 11-15 出片规范：无水印不是一句提示词，而是随工单一起交付的硬约束
+                s.Append("  \"noWatermark\": true,\r\n");
+                s.Append("  \"watermark\": false,\r\n");
+                s.Append("  \"watermarkRule\": ").Append(Json.Quote(NoWatermarkRuleCn)).Append(",\r\n");
+                // 完整出片指令随工单落盘，领单会话读工单即可全自动执行，不用主人复制粘贴
+                s.Append("  \"request\": ")
+                 .Append(Json.Quote(BuildBuddyRequest(it, imagePath, cfg.LibRoot, seconds)))
+                 .Append(",\r\n");
                 s.Append("  \"prompt\": ").Append(Json.Quote(BuildPrompt(it, seconds))).Append("\r\n");
                 s.Append("}\r\n");
                 File.WriteAllText(BuddyJobPath(it.Id), s.ToString(), new UTF8Encoding(false));
             }
             catch (Exception ex) { msg = "登记待领工单失败：" + ex.Message; return false; }
 
-            Log.Note("WorkBuddy 积分通道：已登记待领工单 " + it.Id
-                     + "（未提交、未扣积分，等会话里确认）");
-            msg = "已登记 WorkBuddy 待领工单（等你在会话里确认，未扣积分）";
+            Log.Note("WorkBuddy 积分通道：已自动提交待领工单 " + it.Id
+                     + "（客户端在跑会自动领单出片，未扣积分）");
+            msg = "已自动提交给 WorkBuddy（客户端在跑会自动出片并自动播放，未扣积分）";
             return true;
         }
 
@@ -118,6 +126,30 @@ namespace WallpaperManager
         {
             try { return Directory.Exists(BuddyDir) ? Directory.GetFiles(BuddyDir, "*.json").Length : 0; }
             catch { return 0; }
+        }
+
+        /// <summary>工单躺了多久（分钟）。11-15：用来判断「已提交但没人领」，别无限挂⏳。</summary>
+        public static double BuddyJobAgeMinutes(string id)
+        {
+            try
+            {
+                string p = BuddyJobPath(id);
+                if (!File.Exists(p)) return 0;
+                double m = (DateTime.UtcNow - File.GetLastWriteTimeUtc(p)).TotalMinutes;
+                return m < 0 ? 0 : m;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// 工单超过一轮领单间隔还没人动、且心跳不新鲜 → 判定「无人领单」。
+        /// 这是「绝不显示假生成中」的延伸：等也得分清真在等还是根本没人在干。
+        /// </summary>
+        public static bool BuddyJobStuck(string id)
+        {
+            if (!File.Exists(BuddyJobPath(id))) return false;
+            return BuddyJobAgeMinutes(id) > BuddyBridge.JobStuckMinutes
+                   && !BuddyBridge.HeartbeatFresh();
         }
 
         /// <summary>约定：图片 images\xxx.jpg ↔ 视频 videos\xxx.mp4（同名 id）</summary>
@@ -177,8 +209,37 @@ namespace WallpaperManager
         }
 
         /// <summary>
-        /// 统一的生成提示词。三条硬约束都写进去了（时长 3 秒、镜头不动、无水印），
-        /// 但**不能指望服务端一定照做** —— 出片后还是要过一道检查，见 docs 里的出片规范。
+        /// 11-15：主人发现库里倒数第二、第三张的动态视频都带水印，而旧提示词里
+        /// 明明已经写了 "No watermark" —— 说明**只靠一句提示词去不掉水印**。
+        /// 实测（biliart-38588664-1）进一步确认：视频生成平台按《人工智能生成合成内容
+        /// 标识办法》在左上角硬打「AI生成」角标，提示词无法约束。
+        /// 主人拍板的口径：**先按无水印要求生成，出片后检测角标，局部修补干净再交付**。
+        /// 三条落地位置：
+        ///   1) 生成侧：所有出片提示词统一拼接 NoWatermarkRule；付费直连另有
+        ///      GenApi 的 "watermark":false 请求参数；积分通道工单带明文标记。
+        ///   2) 验收侧：自动领单出片后必须抽帧检查；平台「AI生成」合规角标用 delogo
+        ///      对角标区域做局部修补（仅左上角、区域约 88×44 内）后交付；
+        ///      除合规角标外的其他水印、或修补不干净的，一律不许写进 videos\\。
+        ///   3) 历史片：已有水印片标注「待重出」，由主人在「重新生成一片」里显式决定，
+        ///      绝不擅自重复消耗积分。
+        /// 这段常量是**唯一口径**，界面说明、工单、自检都从这儿取，不再各写一句。
+        /// </summary>
+        public const string NoWatermarkRule =
+              "No watermark anywhere in the frame: no platform logo, no AI-generated mark, "
+            + "no username, no timestamp, no text overlay, no caption, no border. "
+            + "If the source image has a corner watermark, remove it before animating. "
+            + "The delivered MP4 must be visually clean; a watermarked clip must not be delivered.";
+
+        public const string NoWatermarkRuleCn =
+              "生成视频必须无水印：画面里不得出现平台标识、用户名、时间、字幕或边框；"
+            + "源图角落若有水印，生成时先去掉。服务商硬打的「AI生成」合规角标在提示词里"
+            + "去不掉 —— 按主人拍板：先生成，出片后抽帧检查，再用 delogo 对左上角角标区域"
+            + "（约 88×44 像素）做局部修补，修补干净才交付。除合规角标外的其他水印、"
+            + "或修补后仍能看出痕迹的 mp4，一律不入库、不播放。";
+
+        /// <summary>
+        /// 统一的生成提示词。时长、镜头、循环、无水印四条硬约束都写进去了，
+        /// 但**不能指望服务端一定照做** —— 出片后还是要过一道检查，见上方出片规范。
         /// </summary>
         public static string BuildPrompt(WallpaperItem it, int seconds)
         {
@@ -188,7 +249,7 @@ namespace WallpaperManager
                  + "strands of hair and the hem / sleeves of clothing ripple softly in a light breeze, "
                  + "subtle breathing. Camera completely static: no pan, no zoom, no drift, no shake. "
                  + "Duration exactly " + seconds + " seconds. Seamless loop: the last frame must match "
-                 + "the first frame. No watermark, no logo, no text overlay, no caption, no border.";
+                 + "the first frame. " + NoWatermarkRule;
         }
 
         // ---------------------------------------------------------------- 交给 WorkBuddy 代出片
@@ -211,28 +272,33 @@ namespace WallpaperManager
         /// 下面两段文案抽成常量，界面和自检共用，保证说法一致、不夸大「免费」。
         /// </summary>
         public const string BuddyNote =
-              "出片通道默认「优先 WorkBuddy 积分」：点「云端生成」会先把指令复制到剪贴板，"
-            + "粘到 WorkBuddy 会话，让 Buddy 用多模态模型图生视频，再把 mp4 放进 videos\\<id>.mp4，"
-            + "程序按画面识别后自动播放。不花服务商的钱，但会消耗 WorkBuddy 积分 —— "
+              "出片通道默认「优先 WorkBuddy 积分」：点「云端生成」→ 一次确认 → "
+            + "程序自动登记待领工单，WorkBuddy 客户端在跑就自动领单、用多模态模型图生视频，"
+            + "mp4 落到 videos\\<id>.mp4 后程序自动识别、自动换上桌面并播放。\n"
+            + "全程不用复制指令、不用粘贴、不用手动开任务，你只需那一次确认。"
+            + "不花服务商的钱，但会消耗 WorkBuddy 积分 —— "
             + "不是 Hy4 / Hy3 的对话免费额度（限免到 2026-11-15 23:59，每日有免费额度，触及后消耗积分）。\n"
             + "关于 Hy4 / Hy3：它们是 WorkBuddy 客户端的对话 / 推理模型（图片输入 + 思考模式），"
             + "只能看图、写字，生成不了 mp4；本程序是独立 exe，不共享 WorkBuddy 的模型额度或 API Key，"
             + "所以模型列表里只有两家的图生视频模型，不会列出它们 —— 选了也出不了片。\n"
+            + "出片规范：" + NoWatermarkRuleCn + "\n"
             + "想完全不打开 WorkBuddy 也能出片：把「出片通道」切到「服务商 API Key」，"
             + "填自己的百炼 / 方舟 Key，程序自己直连提交、轮询、下载（按秒付费，"
             + "720P 约 ¥0.45 / 3 秒）。积分通道依赖 WorkBuddy 客户端在运行"
-            + "（自动领单任务在客户端里跑）；客户端没开时工单会留着等，"
+            + "（自动领单任务在客户端里跑，每小时领一次单）；客户端没开时工单会留着等，"
             + "不会自动出片，也不会扣积分。";
 
-        public const string BuddyMenuLabel = "⧉ 复制交给 WorkBuddy 的指令（不填 Key）";
+        public const string BuddyMenuLabel = "⧉ 手动兜底：复制交给 WorkBuddy 的指令（不填 Key）";
         public const string BuddyMenuTip =
-              "Hy4 / Hy3 是 WorkBuddy 的免费对话模型，不能生成视频；"
-            + "这条指令让 Buddy 用多模态能力代出片（会消耗积分）。只复制文字，不下单、不扣费。";
+              "正常点「云端生成」一次确认就会自动出片，一般用不到这项。"
+            + "Hy4 / Hy3 是 WorkBuddy 的对话模型，不能生成视频；这条指令让 Buddy 用多模态能力"
+            + "代出片（会消耗积分）。只复制文字，不下单、不扣费。";
 
         /// <summary>
-        /// 只生成那段可以粘进 WorkBuddy 会话的话，是纯函数：
+        /// 生成工单里随附的完整出片指令，是纯函数：
         /// 不写剪贴板、不写工单、不发请求、不碰磁盘，也绝不会自动触发积分消耗。
-        /// 真要出片由主人在会话里粘贴、看到积分提示后自己确认。
+        /// 11-15：主流程不再要求主人复制粘贴；这段文本随待领工单落盘，
+        /// 由自动领单的 WorkBuddy 会话读取后直接出片（程序里那一次确认即授权）。
         /// </summary>
         public static string BuildBuddyRequest(WallpaperItem it, string imagePath, string libRoot, int seconds)
         {
@@ -247,15 +313,22 @@ namespace WallpaperManager
               .Append(" 秒的无缝循环飘动短片。\r\n\r\n");
             sb.Append("壁纸 id：").Append(it.Id).Append("\r\n");
             sb.Append("源图（作为首帧，严格保持画面不变）：").Append(imagePath ?? "").Append("\r\n");
-            sb.Append("出片后请把 MP4 放到：").Append(outPath).Append("\r\n");
-            sb.Append("（这个路径在壁纸库里，写入前请先跟我确认；放好后壁纸管家会自动识别并播放，")
+            sb.Append("出片后请把 MP4 直接放到：").Append(outPath).Append("\r\n");
+            sb.Append("（这个路径在壁纸库里，用户已在壁纸管家点过「确认生成」授权本次出片，")
+              .Append("不用再问一次；放好后壁纸管家会自动识别、自动换上桌面并播放，")
               .Append("不用在程序里填 API Key。）\r\n\r\n");
             sb.Append("要求：").Append(seconds)
               .Append(" 秒、720P、无水印无字幕、镜头完全静止、首尾帧一致可循环。\r\n");
+            sb.Append("【无水印硬规则】").Append(NoWatermarkRuleCn).Append("\r\n");
+            sb.Append("出片后请抽帧检查四角与边缘；服务商硬打的「AI生成」合规角标按主人拍板：")
+              .Append("用 ffmpeg delogo 对左上角角标区域（约 x=2,y=4,w=88,h=44）局部修补干净；")
+              .Append("除合规角标外的其他水印、或修补后仍有可见痕迹的 mp4 不许放进 videos\\。\r\n");
             sb.Append("提示词：").Append(BuildPrompt(it, seconds)).Append("\r\n\r\n");
             sb.Append("费用说明：这一步走的是视频生成模型，会消耗 WorkBuddy 积分；\r\n");
             sb.Append("Hy4 / Hy3 的限时免费只覆盖对话额度，不包含图片与视频生成。\r\n");
-            sb.Append("请先告诉我预计消耗多少积分，等我确认后再生成，不要直接扣。\r\n");
+            sb.Append("授权说明：用户已经在壁纸管家点过「确认生成」授权本次出片，\r\n");
+            sb.Append("请按平台要求说明本次积分消耗估算后直接生成，不要再向用户二次确认，\r\n");
+            sb.Append("也不要把工单留在「等确认」状态 —— 全自动完成出片与交付。\r\n");
             sb.Append("另外：如果 videos\\ 里已经有跟这张图同一画面的片子，就别重新生成，")
               .Append("直接告诉我就行 —— 壁纸管家会按画面匹配并直接播放。");
             return sb.ToString();

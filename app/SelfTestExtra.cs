@@ -1345,6 +1345,11 @@ namespace WallpaperManager
                 note.IndexOf("积分") >= 0, "");
             Hit(sb, ref pass, ref total, "说明不含「免费出片 / 0 元」误导",
                 note.IndexOf("免费出片") < 0 && note.IndexOf("0 元") < 0, "");
+            Hit(sb, ref pass, ref total, "说明写明一次确认即全自动、不再要复制粘贴",
+                note.IndexOf("一次确认") >= 0 && note.IndexOf("不用复制指令") >= 0
+                && note.IndexOf("不用粘贴") >= 0, "");
+            Hit(sb, ref pass, ref total, "说明写入项目级无水印硬规则",
+                note.IndexOf(CloudGen.NoWatermarkRuleCn) >= 0, "");
             Hit(sb, ref pass, ref total, "模型目录里绝不混入 hy4 / hy3（选了也调不通）",
                 GenModels.Find("hy4") == null && GenModels.Find("hy3") == null
                 && GenModels.Find("Hy4 preview") == null, "");
@@ -1372,8 +1377,12 @@ namespace WallpaperManager
                 text.IndexOf("Camera completely static") >= 0 && text.IndexOf("Seamless loop") >= 0, "");
             Hit(sb, ref pass, ref total, "指令写明消耗积分、不是对话免费额度",
                 text.IndexOf("积分") >= 0 && text.IndexOf("Hy4 / Hy3") >= 0, "");
-            Hit(sb, ref pass, ref total, "指令要求先报积分并等确认，不自动扣",
-                text.IndexOf("等我确认后再生成") >= 0 && text.IndexOf("不要直接扣") >= 0, "");
+            Hit(sb, ref pass, ref total, "程序里那一次确认即授权，客户端不再二次确认",
+                text.IndexOf("不要再向用户二次确认") >= 0
+                && text.IndexOf("点过「确认生成」授权") >= 0, "");
+            Hit(sb, ref pass, ref total, "指令写入无水印硬规则与出片后抽帧验收",
+                text.IndexOf(CloudGen.NoWatermarkRuleCn) >= 0
+                && text.IndexOf("抽帧检查四角") >= 0, "");
             Hit(sb, ref pass, ref total, "指令写明已有同画面片子就不重出",
                 text.IndexOf("同一画面的片子") >= 0, "");
             Hit(sb, ref pass, ref total, "秒数超过上限被夹到 3 秒",
@@ -1428,6 +1437,10 @@ namespace WallpaperManager
             bool savedNoClipboard = App.SelfTestNoClipboard;
             bool savedNoPlay = App.SelfTestNoPlay;
             bool savedNoPlayerOps = app.SelfTestNoPlayerOps;
+            bool? savedClientAlive = BuddyBridge.SelfTestClientAlive;
+            bool? savedHeartbeat = BuddyBridge.SelfTestHeartbeatFresh;
+            bool savedNoLaunch = BuddyBridge.SelfTestNoLaunch;
+            string savedCopied = App.LastCopiedText;
             int queueBefore = CloudGen.PendingCount();
 
             string tmp2 = Path.Combine(baseDir, ".selftest-tmp", "buddy-channel");
@@ -1449,7 +1462,11 @@ namespace WallpaperManager
                 App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
                 App.SelfTestNoClipboard = true;
                 App.SelfTestNoPlay = true;
+                App.LastCopiedText = "";         // 主流程不许再往剪贴板写任何东西
                 app.SelfTestNoPlayerOps = true;
+                BuddyBridge.SelfTestClientAlive = true;      // 不依赖本机恰好开着客户端
+                BuddyBridge.SelfTestHeartbeatFresh = true;
+                BuddyBridge.SelfTestNoLaunch = true;         // 禁止自检真去拉起 GUI
                 CloudGen.RemoveBuddyJob(still.Id);
                 RelatedVideo.Invalidate();
 
@@ -1491,12 +1508,25 @@ namespace WallpaperManager
                 Hit(sb, ref pass, ref total, "工单写明源图与目标 videos\\<id>.mp4",
                     jobText.IndexOf("zz-buddy-hint.jpg") >= 0
                     && jobText.IndexOf("zz-buddy-hint.mp4") >= 0, "");
+                Hit(sb, ref pass, ref total, "工单内嵌完整出片指令 request（领单会话免复制粘贴）",
+                    jobText.IndexOf("request") >= 0
+                    && jobText.IndexOf("不要再向用户二次确认") >= 0, "");
+                Hit(sb, ref pass, ref total, "工单带无水印硬标记与中文规则",
+                    jobText.IndexOf("noWatermark") >= 0
+                    && jobText.IndexOf(CloudGen.NoWatermarkRuleCn) >= 0, "");
                 Hit(sb, ref pass, ref total, "绝不写 queue 工单（不会误走付费直连）",
                     !File.Exists(CloudGen.JobPath(still.Id))
                     && CloudGen.PendingCount() == queueBefore, "queue=" + queueBefore);
-                Hit(sb, ref pass, ref total, "出片指令已生成（自检不写系统剪贴板）",
-                    App.LastCopiedText.IndexOf(still.Id) >= 0
-                    && App.LastCopiedText.IndexOf("videos\\") >= 0, "");
+                Hit(sb, ref pass, ref total, "生成前检测=Ok 且无需申请启动",
+                    App.LastReadyState == "Ok"
+                    && App.LastLaunchDetail.IndexOf("无需启动") >= 0,
+                    App.LastReadyState + " / " + App.LastLaunchDetail);
+                Hit(sb, ref pass, ref total, "自动提交的指令文本已生成",
+                    App.LastSubmitText.IndexOf(still.Id) >= 0
+                    && App.LastSubmitText.IndexOf("videos\\") >= 0, "");
+                Hit(sb, ref pass, ref total, "主流程不写系统剪贴板（手动兜底才写）",
+                    App.LastCopiedText == "",
+                    App.LastCopiedText == "" ? "" : "LastCopiedText 非空：" + App.LastCopiedText);
                 Hit(sb, ref pass, ref total, "状态是「等 Buddy 出片」而不是「生成中」",
                     CloudGen.StateOf(app.Config, still) == CloudGen.State.BuddyPending,
                     CloudGen.StateOf(app.Config, still).ToString());
@@ -1505,15 +1535,17 @@ namespace WallpaperManager
                     w2 != null && w2.SelfTestBadgeText(still.Id) == "⏳ 等 Buddy 出片",
                     w2 == null ? "窗口空" : w2.SelfTestBadgeText(still.Id));
 
-                // 取消 / 改用付费：这两种选择都不许登记工单、不许扣积分
+                // 取消：确认框只剩「是 / 否」，两种「不生成」的选择都不许登记工单
                 CloudGen.RemoveBuddyJob(still.Id);
-                App.SelfTestBuddyAnswer = MessageBoxResult.Cancel;
-                app.StartBuddyGen(still);
-                Hit(sb, ref pass, ref total, "点「取消」不登记工单",
-                    !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
                 App.SelfTestBuddyAnswer = MessageBoxResult.No;
                 app.StartBuddyGen(still);
-                Hit(sb, ref pass, ref total, "选「改用服务商 Key」本次不登记积分工单",
+                Hit(sb, ref pass, ref total, "点「否」取消不登记工单、不扣积分",
+                    !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
+                Hit(sb, ref pass, ref total, "取消时确认框写明生成前检测结果",
+                    App.LastBuddyDialog.IndexOf("生成前检测") >= 0, "");
+                App.SelfTestBuddyAnswer = MessageBoxResult.Cancel;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "异常返回值同样不登记工单",
                     !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
 
                 // 到货：WorkBuddy 会话把 mp4 放进 videos\ → 自动收工单、状态转 Ready
@@ -1548,8 +1580,370 @@ namespace WallpaperManager
                 App.SelfTestNoClipboard = savedNoClipboard;
                 App.SelfTestNoPlay = savedNoPlay;
                 app.SelfTestNoPlayerOps = savedNoPlayerOps;
+                BuddyBridge.SelfTestClientAlive = savedClientAlive;
+                BuddyBridge.SelfTestHeartbeatFresh = savedHeartbeat;
+                BuddyBridge.SelfTestNoLaunch = savedNoLaunch;
+                App.LastCopiedText = savedCopied;
                 RelatedVideo.Invalidate();
                 try { if (Directory.Exists(tmp2)) Directory.Delete(tmp2, true); } catch { }
+            }
+
+            return Finish(sb, pass, total);
+        }
+
+        /// <summary>
+        /// 11-15：主人要求把「复制指令 → 打开任务」压缩成「点击生成 → 确认 → 自动出片自动播放」，
+        /// 且生成前要检测 WorkBuddy 是否启动可用，不可用申请启动（v0.9.4 主自检）。
+        ///
+        /// 全隔离：临时库 / 临时配置 / 假客户端 exe / 假心跳都在仓库内 .selftest-tmp，
+        /// 不拉起真客户端（SelfTestNoLaunch）、不写系统剪贴板、不写真实 jobs\buddy\ready.json、
+        /// 不设系统壁纸、不写 D:\Wallpaper / %APPDATA%。
+        /// 覆盖：BuddyBridge 三态检测与心跳新鲜窗口、NoClient 申请启动成功 / 失败两路、
+        /// 确认一次即自动提交（含 RegenCloud 不叠第二层确认）、取消不登记、
+        /// 工单带 request / 无水印字段、客户端路径配置往返。
+        /// </summary>
+        public static string AutoGenFlow(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+
+            string savedDir = ConfigStore.DirOverride;
+            string savedLib = app.Config.LibRoot;
+            string savedChannel = app.Config.GenChannel;
+            string savedBuddyExe = app.Config.BuddyExe;
+            List<WallpaperItem> savedItems = app.Items;
+            bool savedNoBuddyDialogs = App.SelfTestNoBuddyDialogs;
+            MessageBoxResult savedBuddyAnswer = App.SelfTestBuddyAnswer;
+            bool savedNoClipboard = App.SelfTestNoClipboard;
+            bool savedNoPlay = App.SelfTestNoPlay;
+            bool savedNoPlayerOps = app.SelfTestNoPlayerOps;
+            bool? savedClientAlive = BuddyBridge.SelfTestClientAlive;
+            bool? savedHeartbeat = BuddyBridge.SelfTestHeartbeatFresh;
+            string savedHeartbeatPath = BuddyBridge.SelfTestHeartbeatPath;
+            bool savedNoLaunch = BuddyBridge.SelfTestNoLaunch;
+            bool savedNoExe = BuddyBridge.SelfTestNoExe;
+            int savedLaunchCount = BuddyBridge.LaunchCount;
+            string savedPickerFailure = BuddyBridge.SelfTestPickerFailure;
+            string savedCopied = App.LastCopiedText;
+
+            string tmp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".selftest-tmp", "autogen");
+            string lib = Path.Combine(tmp, "lib");
+            string cfg = Path.Combine(tmp, "cfg");
+            string hb = Path.Combine(tmp, "ready.json");
+            string fakeExe = Path.Combine(tmp, "WorkBuddy.exe");
+
+            WallpaperItem still = BadgeItem("zz-autogen", "一键生成测试图");
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(lib, "images"));
+                Directory.CreateDirectory(Path.Combine(lib, "videos"));
+                Directory.CreateDirectory(cfg);
+                string img = Path.Combine(lib, "images", "zz-autogen.jpg");
+                File.WriteAllBytes(img, Encoding.UTF8.GetBytes("autogen probe image"));
+                File.WriteAllBytes(fakeExe, Encoding.UTF8.GetBytes("fake client exe"));
+                still.ImagePath = img;
+                still.File = "images/zz-autogen.jpg";
+
+                ConfigStore.DirOverride = cfg;
+                app.Config.LibRoot = lib;
+                app.Config.GenChannel = "buddy";
+                app.Config.BuddyExe = fakeExe;
+                app.Items = new List<WallpaperItem>();
+                app.Items.Add(still);
+                App.SelfTestNoBuddyDialogs = true;
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+                App.SelfTestNoClipboard = true;
+                App.SelfTestNoPlay = true;
+                app.SelfTestNoPlayerOps = true;
+                App.LastCopiedText = "";
+                BuddyBridge.SelfTestNoLaunch = true;   // 禁止自检真去拉起 GUI
+                CloudGen.RemoveBuddyJob(still.Id);
+                RelatedVideo.Invalidate();
+
+                // ---- 一、三态检测：Ok / ClientOnly / NoClient 的判定与如实文案 ----
+                BuddyBridge.SelfTestHeartbeatPath = hb;
+                File.WriteAllText(hb, "{\"ts\":0}", Encoding.UTF8);
+                BuddyBridge.SelfTestClientAlive = true;
+                BuddyBridge.SelfTestHeartbeatFresh = true;
+                string reason;
+                BuddyBridge.ReadyState st = BuddyBridge.Check(out reason);
+                Hit(sb, ref pass, ref total, "客户端在跑 + 心跳新鲜 → 检测为 Ok",
+                    st == BuddyBridge.ReadyState.Ok && reason.IndexOf("就绪") >= 0, reason);
+                BuddyBridge.SelfTestHeartbeatFresh = false;
+                st = BuddyBridge.Check(out reason);
+                Hit(sb, ref pass, ref total, "客户端在跑但没心跳 → 如实报 ClientOnly",
+                    st == BuddyBridge.ReadyState.ClientOnly && reason.IndexOf("自动提交工单") >= 0, reason);
+                BuddyBridge.SelfTestClientAlive = false;
+                st = BuddyBridge.Check(out reason);
+                Hit(sb, ref pass, ref total, "客户端不在 → 如实报 NoClient",
+                    st == BuddyBridge.ReadyState.NoClient && reason.IndexOf("没检测到") >= 0, reason);
+
+                // ---- 二、心跳新鲜窗口：新鲜 / 过期 / 未来 / 缺文件 / 乱码（自检路径，不碰真实心跳）----
+                BuddyBridge.SelfTestHeartbeatFresh = null;
+                long now = (long)(DateTime.UtcNow
+                    - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                File.WriteAllText(hb, "{\"ts\":" + now + "}", Encoding.UTF8);
+                Hit(sb, ref pass, ref total, "心跳新鲜窗口内算新鲜", BuddyBridge.HeartbeatFresh(), "");
+                File.WriteAllText(hb, "{\"ts\":" + (now - 7200) + "}", Encoding.UTF8);
+                Hit(sb, ref pass, ref total, "心跳 2 小时前算过期", !BuddyBridge.HeartbeatFresh(), "");
+                File.WriteAllText(hb, "{\"ts\":" + (now + 9999) + "}", Encoding.UTF8);
+                Hit(sb, ref pass, ref total, "心跳来自未来（时钟错乱）不算新鲜", !BuddyBridge.HeartbeatFresh(), "");
+                File.Delete(hb);
+                Hit(sb, ref pass, ref total, "没有心跳文件不算新鲜", !BuddyBridge.HeartbeatFresh(), "");
+                File.WriteAllText(hb, "not json", Encoding.UTF8);
+                Hit(sb, ref pass, ref total, "心跳文件乱码不算新鲜", !BuddyBridge.HeartbeatFresh(), "");
+
+                // ---- 三、就绪时一次确认即自动提交（可用直接生成）----
+                BuddyBridge.SelfTestClientAlive = true;
+                BuddyBridge.SelfTestHeartbeatFresh = true;
+                int dlgBefore = App.BuddyDialogCount;
+                app.StartBuddyGen(still);
+                string job = CloudGen.BuddyJobPath(still.Id);
+                Hit(sb, ref pass, ref total, "就绪时只弹一次确认（不多弹）",
+                    App.BuddyDialogCount == dlgBefore + 1, "");
+                Hit(sb, ref pass, ref total, "就绪时确认后自动提交工单（无需启动）",
+                    File.Exists(job) && App.LastReadyState == "Ok"
+                    && App.LastLaunchDetail.IndexOf("无需启动") >= 0, job);
+                Hit(sb, ref pass, ref total, "确认框写明一次确认即授权、无复制粘贴",
+                    App.LastBuddyDialog.IndexOf("生成前检测") >= 0
+                    && App.LastBuddyDialog.IndexOf("不用复制指令") >= 0
+                    && App.LastBuddyDialog.IndexOf("不会再向你要第二次确认") >= 0, "");
+                Hit(sb, ref pass, ref total, "全程不写系统剪贴板",
+                    App.LastCopiedText == "", "");
+                CloudGen.RemoveBuddyJob(still.Id);
+
+                // ---- 三·二、客户端自带 CLI 在场：确认框必须说清「程序直接请求客户端出片」 ----
+                // 这一支才是主人要的形态，之前自检根本没覆盖到（假客户端目录里没有 cli 资源，
+                // cliOk 恒为 false，永远只验工单文案）。这里补一个假 CLI 入口把它点亮。
+                string fakeCliDir = Path.Combine(tmp, @"resources\app.asar.unpacked\cli\bin");
+                Directory.CreateDirectory(fakeCliDir);
+                File.WriteAllText(Path.Combine(fakeCliDir, "codebuddy"), "// selftest fake cli", Encoding.UTF8);
+                BuddyCli.SelfTestNoStart = true;     // 只验分支与文案，绝不起 node
+                int cliStartBefore = BuddyCli.StartCount;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "CLI 通道在时确认框写明由程序直接调 VideoGen",
+                    App.LastBuddyDialog.IndexOf("直接调用 VideoGen") >= 0
+                    && App.LastBuddyDialog.IndexOf("不用等整点领单") >= 0, "");
+                Hit(sb, ref pass, ref total, "确认走的是直连分支且自检绝不真起 CLI（不消耗积分）",
+                    BuddyCli.StartCount == cliStartBefore + 1
+                    && BuddyCli.LastDetail.IndexOf("跳过真实启动") >= 0, BuddyCli.LastDetail);
+                BuddyCli.SelfTestNoStart = false;
+                CloudGen.RemoveBuddyJob(still.Id);
+                // 收掉假 CLI，后面的用例回到「工单排队」通道，避免两条通道互相串味
+                try { Directory.Delete(Path.Combine(tmp, "resources"), true); } catch { }
+
+                // ---- 三·三、CLI 未授权：必须弹窗说清并给出口，不许只改一行状态栏 ----
+                // 主人原话：「我点击之后只显示等待生成，WorkBuddy 和壁纸程序啥反应没有」。
+                Directory.CreateDirectory(fakeCliDir);
+                File.WriteAllText(Path.Combine(fakeCliDir, "codebuddy"), "// selftest fake cli", Encoding.UTF8);
+                BuddyCli.SelfTestForceFail = "WorkBuddy CLI 还没授权：需要一次性登录"
+                                           + "（设置里点「授权出片」，或在命令行执行 /login）";
+                App.LastAuthPrompt = "";
+                CloudGen.RemoveBuddyJob(still.Id);
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "CLI 未授权时弹出引导框（不再只改状态栏）",
+                    App.LastAuthPrompt.IndexOf("/login") >= 0
+                    && App.LastAuthPrompt.IndexOf("授权窗口") >= 0, "");
+                Hit(sb, ref pass, ref total, "未授权引导框给出「再点一次云端生成」的明确出口",
+                    App.LastAuthPrompt.IndexOf("再点一次") >= 0, "");
+                Hit(sb, ref pass, ref total, "点「是」去授权时本次不写工单（不留没人领的单）",
+                    !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
+                BuddyCli.SelfTestForceFail = "";
+                try { Directory.Delete(Path.Combine(tmp, "resources"), true); } catch { }
+
+                // ---- 四、不可用时点「是」= 授权申请启动：启动成功才提交 ----
+                BuddyBridge.SelfTestClientAlive = false;
+                BuddyBridge.SelfTestHeartbeatFresh = false;
+                int launchBefore = BuddyBridge.LaunchCount;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "NoClient 确认框写明会先申请启动客户端",
+                    App.LastBuddyDialog.IndexOf("先申请启动 WorkBuddy 客户端") >= 0, "");
+                Hit(sb, ref pass, ref total, "申请启动成功后仍自动提交工单",
+                    File.Exists(job) && BuddyBridge.LaunchCount == launchBefore + 1, "");
+                Hit(sb, ref pass, ref total, "按配置里的客户端路径启动（优先自动发现结果）",
+                    BuddyBridge.LastLaunchPath == fakeExe, BuddyBridge.LastLaunchPath);
+                Hit(sb, ref pass, ref total, "启动结果如实汇报", App.LastLaunchDetail.Length > 0, "");
+                CloudGen.RemoveBuddyJob(still.Id);
+
+                // ---- 五、找不到客户端 exe：点「是」也如实失败，不写工单、不留假状态 ----
+                BuddyBridge.SelfTestNoExe = true;
+                launchBefore = BuddyBridge.LaunchCount;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "找不到客户端时不写工单",
+                    !File.Exists(job), "");
+                Hit(sb, ref pass, ref total, "失败细节如实给出（引导填路径 / 手动打开）",
+                    App.LastLaunchDetail.IndexOf("没找到") >= 0
+                    && App.LastLaunchDetail.IndexOf("手动打开") >= 0, App.LastLaunchDetail);
+                BuddyBridge.SelfTestNoExe = false;
+
+                // ---- 六、不可用时点「否」：什么都不做，也不申请启动 ----
+                App.SelfTestBuddyAnswer = MessageBoxResult.No;
+                launchBefore = BuddyBridge.LaunchCount;
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "点「否」取消：不申请启动、不写工单",
+                    !File.Exists(job) && BuddyBridge.LaunchCount == launchBefore, "");
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+
+                // ---- 七、RegenCloud 积分通道不叠第二层确认 ----
+                dlgBefore = App.BuddyDialogCount;
+                app.RegenCloud(still);
+                Hit(sb, ref pass, ref total, "「重新生成一片」积分通道同样只弹一次确认",
+                    App.BuddyDialogCount == dlgBefore + 1 && File.Exists(job), "");
+                Hit(sb, ref pass, ref total, "重出确认框写明旧片保留",
+                    App.LastBuddyDialog.IndexOf("旧片保留") >= 0, "");
+                CloudGen.RemoveBuddyJob(still.Id);
+
+                // ---- 八、工单字段：内嵌 request 与无水印硬标记 ----
+                app.StartBuddyGen(still);
+                string jobText = File.Exists(job) ? File.ReadAllText(job) : "";
+                Hit(sb, ref pass, ref total, "工单内嵌完整出片指令 request",
+                    jobText.IndexOf("request") >= 0
+                    && jobText.IndexOf("不要再向用户二次确认") >= 0, "");
+                Hit(sb, ref pass, ref total, "工单带 noWatermark / watermark:false 硬标记",
+                    jobText.IndexOf("noWatermark") >= 0
+                    && jobText.IndexOf("\"watermark\": false") >= 0, "");
+                Hit(sb, ref pass, ref total, "工单写入中文无水印硬规则",
+                    jobText.IndexOf(CloudGen.NoWatermarkRuleCn) >= 0, "");
+                Hit(sb, ref pass, ref total, "工单标注积分通道与待领状态",
+                    jobText.IndexOf("workbuddy-credits") >= 0
+                    && jobText.IndexOf("waiting-for-workbuddy") >= 0, "");
+
+                // ---- 九、客户端路径配置：设置面板往返 + 存取往返 ----
+                string panelText = "";
+                try
+                {
+                    SettingsWindow sw = new SettingsWindow(app);
+                    sw.SelfTestSetBuddyExe(fakeExe);
+                    panelText = sw.SelfTestBuddyExeText();
+                    sw.Close();
+                }
+                catch (Exception ex) { panelText = "× 异常 " + ex.Message; }
+                Hit(sb, ref pass, ref total, "设置面板客户端路径输入框往返一致",
+                    panelText == fakeExe, panelText);
+                // ---- 六、11-15 晚饭后：领单被 429 挡回时，程序必须说得出原因 ----
+                // 主人原话：「点了生成只显示等待，WorkBuddy 和壁纸程序啥反应没有」。
+                // 真相是补跑会话 21 秒就被 429 额度限流打回，程序却一个字都没透传出来。
+                BuddyBridge.SelfTestNoExe = false;
+                BuddyBridge.SelfTestClientAlive = true;
+                BuddyBridge.SelfTestHeartbeatFresh = true;
+                BuddyBridge.SelfTestPickerFailure =
+                    "429 您的使用量已超出频率限制，将在 2026-11-15 21:18:21 UTC+8 重置";
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+                CloudGen.RemoveBuddyJob(still.Id);
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "确认框直接写出上次领单的真实失败原因（429 不再被藏起来）",
+                    App.LastBuddyDialog.IndexOf("上次领单结局：失败") >= 0
+                    && App.LastBuddyDialog.IndexOf("429") >= 0, "");
+                Hit(sb, ref pass, ref total, "失败原因带重置时间，主人能判断什么时候再试",
+                    App.LastBuddyDialog.IndexOf("21:18") >= 0, "");
+
+                // ---- 七、工单排队超一轮 + 心跳不新鲜 = 没人领（不许无限挂⏳）----
+                string jp = CloudGen.BuddyJobPath(still.Id);
+                Hit(sb, ref pass, ref total, "刚提交的工单不判「未领单」",
+                    File.Exists(jp) && !CloudGen.BuddyJobStuck(still.Id), "");
+                File.SetLastWriteTimeUtc(jp, DateTime.UtcNow.AddMinutes(-120));
+                BuddyBridge.SelfTestHeartbeatFresh = false;
+                Hit(sb, ref pass, ref total, "排队 2 小时 + 心跳不新鲜 → 判「未领单」",
+                    CloudGen.BuddyJobStuck(still.Id), "");
+                MainWindow w3 = app.SelfTestWindow;
+                if (w3 != null) w3.RefreshBadges();
+                Hit(sb, ref pass, ref total, "卡片角标改成「⚠ 未领单」，不再挂⏳干等",
+                    w3 != null && w3.SelfTestBadgeText(still.Id) == "⚠ 未领单",
+                    w3 == null ? "窗口空" : w3.SelfTestBadgeText(still.Id));
+                BuddyBridge.SelfTestHeartbeatFresh = true;
+                if (w3 != null) w3.RefreshBadges();
+                Hit(sb, ref pass, ref total, "领单心跳恢复新鲜后回到「等 Buddy 出片」",
+                    w3 != null && w3.SelfTestBadgeText(still.Id) == "⏳ 等 Buddy 出片",
+                    w3 == null ? "窗口空" : w3.SelfTestBadgeText(still.Id));
+
+                // ---- 八、「为什么没出片」原因框：看完还能一键重新生成 ----
+                // 主人 21:00：「触发未领单后要能申请重新生成，现在做不到」。
+                BuddyBridge.SelfTestClientAlive = false;
+                BuddyBridge.SelfTestHeartbeatFresh = false;
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+                File.SetLastWriteTimeUtc(jp, DateTime.UtcNow.AddMinutes(-120));
+                int launchBefore2 = BuddyBridge.LaunchCount;
+                app.ShowBuddyStuck(still);
+                Hit(sb, ref pass, ref total, "原因框写明工单号、排队时长与客户端状态",
+                    App.LastStuckDialog.IndexOf(still.Id) >= 0
+                    && App.LastStuckDialog.IndexOf("WorkBuddy 客户端：没在运行") >= 0, "");
+                Hit(sb, ref pass, ref total, "原因框把上次 429 结局一起摆出来",
+                    App.LastStuckDialog.IndexOf("429") >= 0, "");
+                Hit(sb, ref pass, ref total, "原因框给出「重新提交」的明确出口（不再是死路）",
+                    App.LastStuckDialog.IndexOf("重新提交") >= 0
+                    && App.LastStuckDialog.IndexOf("点「是」") >= 0, "");
+                Hit(sb, ref pass, ref total, "客户端没开时点「是」先申请把它拉起来",
+                    BuddyBridge.LaunchCount == launchBefore2 + 1, "");
+                Hit(sb, ref pass, ref total, "重新提交后旧工单被刷新（不再判「未领单」）",
+                    File.Exists(jp) && !CloudGen.BuddyJobStuck(still.Id), "");
+                MainWindow w4 = app.SelfTestWindow;
+                if (w4 != null) w4.RefreshBadges();
+                Hit(sb, ref pass, ref total, "角标从「⚠ 未领单」回到「等 Buddy 出片」",
+                    w4 != null && w4.SelfTestBadgeText(still.Id) == "⏳ 等 Buddy 出片",
+                    w4 == null ? "窗口空" : w4.SelfTestBadgeText(still.Id));
+
+                // 客户端已开：不再重复拉起，但仍要能重新提交
+                BuddyBridge.SelfTestClientAlive = true;
+                BuddyBridge.SelfTestHeartbeatFresh = false;
+                File.SetLastWriteTimeUtc(jp, DateTime.UtcNow.AddMinutes(-120));
+                int launchBefore3 = BuddyBridge.LaunchCount;
+                app.ShowBuddyStuck(still);
+                Hit(sb, ref pass, ref total, "客户端已经开着就不再重复拉起",
+                    BuddyBridge.LaunchCount == launchBefore3, "");
+                Hit(sb, ref pass, ref total, "客户端开着时点「是」同样能重新提交（原来只有 OK）",
+                    App.LastStuckDialog.IndexOf("重新提交") >= 0
+                    && File.Exists(jp) && !CloudGen.BuddyJobStuck(still.Id), "");
+
+                // 点「否」绝不动旧工单
+                File.SetLastWriteTimeUtc(jp, DateTime.UtcNow.AddMinutes(-120));
+                DateTime beforeNo = File.GetLastWriteTimeUtc(jp);
+                App.SelfTestBuddyAnswer = MessageBoxResult.No;
+                app.ShowBuddyStuck(still);
+                Hit(sb, ref pass, ref total, "点「否」不动旧工单、不重新提交",
+                    File.Exists(jp) && File.GetLastWriteTimeUtc(jp) == beforeNo, "");
+                App.SelfTestBuddyAnswer = MessageBoxResult.Yes;
+                BuddyBridge.SelfTestPickerFailure = null;
+
+                AppConfig probe = new AppConfig();
+                probe.LibRoot = lib;
+                probe.BuddyExe = fakeExe;
+                ConfigStore.Save(probe);
+                AppConfig reloaded = ConfigStore.Load();
+                Hit(sb, ref pass, ref total, "客户端路径存盘后能原样读回",
+                    reloaded.BuddyExe == fakeExe, reloaded.BuddyExe);
+                Hit(sb, ref pass, ref total, "老配置没有 buddyExe 时读回空串不炸",
+                    new AppConfig().BuddyExe != null, "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "一键生成自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                try { CloudGen.RemoveBuddyJob(still.Id); } catch { }
+                app.Config.LibRoot = savedLib;
+                app.Config.GenChannel = savedChannel;
+                app.Config.BuddyExe = savedBuddyExe;
+                ConfigStore.DirOverride = savedDir;
+                app.Items = savedItems;
+                App.SelfTestNoBuddyDialogs = savedNoBuddyDialogs;
+                App.SelfTestBuddyAnswer = savedBuddyAnswer;
+                App.SelfTestNoClipboard = savedNoClipboard;
+                App.SelfTestNoPlay = savedNoPlay;
+                app.SelfTestNoPlayerOps = savedNoPlayerOps;
+                BuddyBridge.SelfTestClientAlive = savedClientAlive;
+                BuddyBridge.SelfTestHeartbeatFresh = savedHeartbeat;
+                BuddyBridge.SelfTestHeartbeatPath = savedHeartbeatPath;
+                BuddyBridge.SelfTestNoLaunch = savedNoLaunch;
+                BuddyBridge.SelfTestNoExe = savedNoExe;
+                BuddyBridge.SelfTestPickerFailure = savedPickerFailure;
+                BuddyBridge.LaunchCount = savedLaunchCount;
+                App.LastCopiedText = savedCopied;
+                BuddyCli.SelfTestNoStart = false;
+                BuddyCli.SelfTestForceFail = "";
+                RelatedVideo.Invalidate();
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
             }
 
             return Finish(sb, pass, total);
@@ -1652,8 +2046,9 @@ namespace WallpaperManager
                 for (int i = 0; i < real.Count; i++)
                     if (real[i].Id == "biliart-17714251-4") { at = i; break; }
                 WallpaperItem target = at >= 0 ? real[at] : null;
-                Hit(sb, ref pass, ref total, "真实库里倒数第二张正是 biliart-17714251-4",
-                    at == real.Count - 2, "下标 " + at + " / 共 " + real.Count);
+                // 库会不断扩容，位置写死会误报；回归点在「这张的动效标记与开播判定」，不在下标
+                Hit(sb, ref pass, ref total, "真实库里能找到 biliart-17714251-4",
+                    at >= 0, "下标 " + at + " / 共 " + real.Count);
                 Hit(sb, ref pass, ref total, "这张载入后保留动效标记",
                     target != null && target.Motion && target.Effect == 2,
                     target == null ? "未找到" : "Motion=" + target.Motion + " fx=" + target.Effect);

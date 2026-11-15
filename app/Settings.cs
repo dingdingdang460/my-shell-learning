@@ -72,6 +72,7 @@ namespace WallpaperManager
         readonly TextBox cacheBox = new TextBox();
         readonly TextBlock cacheInfo = new TextBlock();
         readonly ComboBox chanBox = new ComboBox();      // 出片通道：WorkBuddy 积分 / 服务商 API Key
+        readonly TextBox buddyExeBox = new TextBox();    // 客户端路径（可选）：不可用时「申请启动」用
         readonly ComboBox provBox = new ComboBox();
         readonly PasswordBox keyBox = new PasswordBox();
         readonly ComboBox modelCombo = new ComboBox();    // 模型改成下拉：看得见单价和大概等多久
@@ -132,6 +133,104 @@ namespace WallpaperManager
             sub.Margin = new Thickness(0, 4, 0, 18);
             sub.Foreground = TextDim;
             root.Children.Add(sub);
+
+            // WorkBuddy 出片通道（11-15 深夜：程序直接调客户端自带的 CLI 出片）
+            root.Children.Add(Label("WorkBuddy 出片（CLI 直连）"));
+            TextBlock cliHint = new TextBlock();
+            cliHint.Text = "点「云端生成」时，程序会直接启动客户端自带的 codebuddy CLI 会话，"
+                         + "由它调用 VideoGen 把图做成动态视频 —— 不用等整点领单、不用复制指令。"
+                         + "首次使用需要在弹出的命令行里执行一次 /login 完成授权，之后一直有效。";
+            cliHint.TextWrapping = TextWrapping.Wrap;
+            cliHint.FontSize = 11.5;
+            cliHint.Foreground = TextDim;
+            cliHint.Margin = new Thickness(0, 2, 0, 8);
+            root.Children.Add(cliHint);
+
+            StackPanel cliRow = new StackPanel();
+            cliRow.Orientation = Orientation.Horizontal;
+            Button authBtn = MakeButton("授权出片（首次）");
+            authBtn.Click += delegate
+            {
+                string why;
+                if (!BuddyCli.Available(app.Config, out why))
+                {
+                    MessageBox.Show(why, "WorkBuddy 出片", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                // 先真探一次再决定要不要登录：已授权就别再折腾主人走一遍 /login。
+                authBtn.IsEnabled = false;
+                authBtn.Content = "检查中…";
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string probe;
+                    bool authed = false;
+                    try { authed = BuddyCli.ProbeAuth(app.Config, out probe); }
+                    catch (Exception ex) { probe = "探测异常：" + ex.Message; }
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        authBtn.Content = "授权出片（首次）";
+                        authBtn.IsEnabled = true;
+                        if (authed)
+                        {
+                            MessageBox.Show(this,
+                                "这个通道已经授权好了，不用再登录一次。\r\n\r\n" + probe
+                                + "\r\n\r\n直接点壁纸的「云端生成」就会调它出片。",
+                                "WorkBuddy 出片", MessageBoxButton.OK, MessageBoxImage.Information);
+                            return;
+                        }
+                        string detail;
+                        if (BuddyCli.OpenLoginConsole(app.Config, out detail))
+                        {
+                            MessageBox.Show(this,
+                                "当前状态：" + probe
+                                + "\r\n\r\n" + detail
+                                + "\r\n\r\n在打开的窗口里输入 /login 回车，浏览器里点一下授权，"
+                                + "看到已登录后关掉那个窗口即可。\r\n之后点「云端生成」就会直接出片。",
+                                "WorkBuddy 出片", MessageBoxButton.OK, MessageBoxImage.Information);
+                        }
+                        else
+                        {
+                            MessageBox.Show(this, detail, "WorkBuddy 出片",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                        }
+                    }));
+                });
+            };
+            cliRow.Children.Add(authBtn);
+
+            Button cliTestBtn = MakeButton("检查通道");
+            cliTestBtn.Margin = new Thickness(8, 0, 0, 0);
+            cliTestBtn.Click += delegate
+            {
+                // 真跑一次 CLI 判授权：以前只看文件在不在，永远说「就绪」，白点一轮。
+                cliTestBtn.IsEnabled = false;
+                cliTestBtn.Content = "检查中…";
+                string cliPath = BuddyCli.ScriptPath(app.Config);
+                string nodePath = BuddyCli.NodeExe();
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string probed;
+                    bool ok = false;
+                    try { ok = BuddyCli.ProbeAuth(app.Config, out probed); }
+                    catch (Exception ex) { probed = "探测异常：" + ex.Message; }
+                    string text = (ok ? "通道就绪：" : "通道不可用：") + probed
+                        + "\r\n\r\nCLI 路径：" + cliPath
+                        + "\r\nnode：" + nodePath
+                        + "\r\nCLI 日志：" + BuddyCli.LogPath
+                        + (ok ? "\r\n\r\n点「云端生成」就会直接调它出片。"
+                              : "\r\n\r\n先点「授权出片（首次）」，在弹出的窗口里输入 /login 回车。");
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        cliTestBtn.Content = "检查通道";
+                        cliTestBtn.IsEnabled = true;
+                        MessageBox.Show(this, text, "WorkBuddy 出片", MessageBoxButton.OK,
+                            ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    }));
+                });
+            };
+            cliRow.Children.Add(cliTestBtn);
+            root.Children.Add(cliRow);
+            root.Children.Add(Separator());
 
             // 壁纸库
             root.Children.Add(Label("壁纸库目录"));
@@ -278,10 +377,13 @@ namespace WallpaperManager
             root.Children.Add(genHead);
 
             TextBlock genHint = new TextBlock();
-            genHint.Text = "右键「云端生成」→ 先看用哪个模型、预计等多久、大概花多少钱 → 确认后应用直连服务商"
-                         + "提交、轮询、下载，到货自动换上桌面。\n"
-                         + "本地脚本出片已停用：它只能挪动已有像素，做不出头发飘动这类内容级动态。\n"
-                         + "费用按服务商公开单价估算，火山方舟按 token 折算，实际以账单为准。";
+            genHint.Text = "默认「优先 WorkBuddy 积分」：右键「云端生成」→ 先检测 WorkBuddy 客户端是否可用"
+                         + " → 只弹一次「确认生成」→ 确认后自动提交、自动出片、到货自动换上桌面并播放。\n"
+                         + "客户端没开时，确认框里点「是」会先申请启动 WorkBuddy；启动失败会如实提示，"
+                         + "不写工单、不扣积分。\n"
+                         + "切成「服务商 API Key」才走直连提交、轮询、下载（按秒付费，以账单为准）；"
+                         + "本地脚本出片已停用。\n"
+                         + "出片规范：" + CloudGen.NoWatermarkRuleCn;
             genHint.FontSize = 11.5;
             genHint.LineHeight = 19;
             genHint.TextWrapping = TextWrapping.Wrap;
@@ -306,6 +408,13 @@ namespace WallpaperManager
             chanBox.SelectedIndex = 0;
             StyleCombo(chanBox);
             root.Children.Add(chanBox);
+
+            root.Children.Add(Label("WorkBuddy 客户端路径（可选，自动检测失败时才填）"));
+            StyleInput(buddyExeBox);
+            buddyExeBox.ToolTip = "生成前会检测 WorkBuddy 客户端是否启动可用；不可用时会申请启动。"
+                + "程序会自己从运行进程、常见安装位置和开始菜单里找 WorkBuddy.exe，"
+                + "只有装在非常规目录、自动找不到时才需要在这里填完整路径。";
+            root.Children.Add(buddyExeBox);
 
             root.Children.Add(Label("服务商"));
             provBox.Items.Add("不用云端模型（点生成会提示先配置）");
@@ -501,6 +610,17 @@ namespace WallpaperManager
         public int SelfTestChannelSelectedIndex()
         {
             return chanBox.SelectedIndex;
+        }
+
+        /// <summary>自检用：客户端路径输入框的往返读写（--autogentest 核对配置）。</summary>
+        public string SelfTestBuddyExeText()
+        {
+            return buddyExeBox.Text == null ? "" : buddyExeBox.Text;
+        }
+
+        public void SelfTestSetBuddyExe(string path)
+        {
+            buddyExeBox.Text = path;
         }
 
         public string SelfTestCloudModels()
@@ -795,6 +915,7 @@ namespace WallpaperManager
 
             // 11-15：出片通道。老配置缺字段时 Load 已回填 buddy，这里照样按值选中
             chanBox.SelectedIndex = c.GenChannel == "api" ? 1 : 0;
+            buddyExeBox.Text = c.BuddyExe == null ? "" : c.BuddyExe;
 
             // 云端模型配置：先切服务商（会重建模型下拉），再按保存的 ID 精确选中
             int pi = 0;
@@ -847,6 +968,7 @@ namespace WallpaperManager
 
             // 11-15：出片通道先存，默认是 WorkBuddy 积分；切成 api 才走按秒付费直连
             c.GenChannel = chanBox.SelectedIndex == 1 ? "api" : "buddy";
+            c.BuddyExe = buddyExeBox.Text == null ? "" : buddyExeBox.Text.Trim();
 
             // 云端模型：服务商 + Key + 目录里的模型 ID + 分辨率，四件套一起存
             c.GenProvider = provBox.SelectedIndex == 1 ? "wanx" : (provBox.SelectedIndex == 2 ? "ark" : "");

@@ -59,6 +59,11 @@ namespace WallpaperManager
         // "api" = 走服务商 API Key 直连（按秒付费）。老配置没这个字段时 Load 会回填 buddy。
         public string GenChannel = "buddy";
 
+        // 11-15：生成前要检测 WorkBuddy 客户端可用；不可用时「申请启动」用这个路径。
+        // 留空 = 自动发现（运行进程 / 常见安装位置 / 开始菜单快捷方式），
+        // 便携安装到非常规目录时可以在设置里手填 WorkBuddy.exe 的完整路径。
+        public string BuddyExe = "";
+
         // ---- 网络（Net.cs）----
         // 空 = 直连（以前的行为）；填 host:port 或 http://host:port 就走代理。
         public string Proxy = "";

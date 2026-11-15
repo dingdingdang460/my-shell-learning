@@ -3095,10 +3095,26 @@ namespace WallpaperManager
                 }
                 else if (cs == CloudGen.State.BuddyPending)
                 {
-                    // 11-15：待领工单还在，点一下重新拿指令（不会重复登记、不会重复扣积分）。
-                    mCloud.Header = "云端生成：等 Buddy 出片（点此重新复制指令）";
-                    mCloud.ToolTip = "WorkBuddy 积分通道：会话确认后才会生成 mp4，现在没有扣积分。";
-                    mCloud.Click += delegate { app.StartBuddyGen(it); };
+                    // 11-15：已自动提交。分两种真相，绝不混着说：
+                    //   还在等（领单任务心跳新鲜）→ 让主人别管，程序自己会收
+                    //   没人领（排队超一轮 + 心跳过期）→ 明确说没人领，点开看原因
+                    if (CloudGen.BuddyJobStuck(it.Id))
+                    {
+                        // 11-15 21:00 主人：「触发未领单后要能申请重新生成，现在做不到」。
+                        // 原来这里只弹一个原因框（客户端开着时甚至只有 OK），是死路。
+                        // 现在标题就写明这条能重新生成，点开是「看原因 + 点是一键重新提交」。
+                        mCloud.Header = "云端生成：工单没人领（点此看原因 / 重新生成）";
+                        mCloud.ToolTip = "已经排了一轮还没人领：WorkBuddy 可能没开、自动领单任务没跑，"
+                                       + "或者领单会话被额度限流挡回去了。点开看原因，"
+                                       + "并可直接「是」重新提交这张工单。";
+                        mCloud.Click += delegate { app.ShowBuddyStuck(it); };
+                    }
+                    else
+                    {
+                        mCloud.Header = "云端生成：已提交，等 Buddy 自动出片（点此查看工单）";
+                        mCloud.ToolTip = "WorkBuddy 客户端在跑时会自动领单出片，到货自动播放；现在没有扣积分。";
+                        mCloud.Click += delegate { app.OpenBuddyFolder(); };
+                    }
                 }
                 else
                 {
@@ -3273,6 +3289,9 @@ namespace WallpaperManager
             bool queued = info.Queued;
             bool manual = info.Manual;
             bool buddy = info.BuddyPending;
+            // 11-15：工单超过一轮领单间隔还没人动、心跳也不新鲜 —— 那就是「没人在领」，
+            // 不能再挂一个让人干等的⏳。角标和右键菜单都要如实说。
+            bool stuck = buddy && CloudGen.BuddyJobStuck(info.Item.Id);
 
             if (!info.HasVideo && !playing && !queued && !manual && !buddy)
             {
@@ -3284,23 +3303,27 @@ namespace WallpaperManager
             badge.Visibility = Visibility.Visible;
             badge.Background = playing
                 ? new SolidColorBrush(Color.FromArgb(228, 46, 92, 168))
-                : queued
-                    ? new SolidColorBrush(Color.FromArgb(220, 40, 78, 84))
-                    : buddy
-                        ? new SolidColorBrush(Color.FromArgb(220, 118, 84, 40))
-                        : manual
-                            ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
-                            : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
+                : stuck
+                    ? new SolidColorBrush(Color.FromArgb(228, 150, 48, 48))
+                    : queued
+                        ? new SolidColorBrush(Color.FromArgb(220, 40, 78, 84))
+                        : buddy
+                            ? new SolidColorBrush(Color.FromArgb(220, 118, 84, 40))
+                            : manual
+                                ? new SolidColorBrush(Color.FromArgb(220, 96, 70, 34))
+                                : new SolidColorBrush(Color.FromArgb(216, 56, 46, 82));
 
             bt.Text = playing ? "▶ 播放中"
+                    : stuck ? "⚠ 未领单"
                     : queued ? "☁ 生成中"
                     : buddy ? "⏳ 等 Buddy 出片"
                     : manual ? "⏸ 待处理" : "✦ 飘动";
             bt.Foreground = playing ? Brushes.White
-                                    : queued ? new SolidColorBrush(Color.FromRgb(168, 232, 226))
-                                    : buddy ? new SolidColorBrush(Color.FromRgb(255, 214, 158))
-                                    : manual ? new SolidColorBrush(Color.FromRgb(240, 206, 146))
-                                             : new SolidColorBrush(Color.FromRgb(228, 217, 255));
+                                    : stuck ? new SolidColorBrush(Color.FromRgb(255, 214, 214))
+                                            : queued ? new SolidColorBrush(Color.FromRgb(168, 232, 226))
+                                            : buddy ? new SolidColorBrush(Color.FromRgb(255, 214, 158))
+                                            : manual ? new SolidColorBrush(Color.FromRgb(240, 206, 146))
+                                                     : new SolidColorBrush(Color.FromRgb(228, 217, 255));
         }
 
         /// <summary>

@@ -203,7 +203,8 @@ namespace WallpaperManager
                     || s.Equals("--badgetest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--launchtest", StringComparison.OrdinalIgnoreCase)
                     || s.Equals("--buddyhinttest", StringComparison.OrdinalIgnoreCase)
-                    || s.Equals("--switchmotiontest", StringComparison.OrdinalIgnoreCase))
+                    || s.Equals("--switchmotiontest", StringComparison.OrdinalIgnoreCase)
+                    || s.Equals("--autogentest", StringComparison.OrdinalIgnoreCase))
                 {
                     skipGreeting = true;
                     break;
@@ -821,6 +822,28 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --switchmotiontest：\r\n" + detail);
                         Log.Note("自检 --switchmotiontest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--autogentest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-15：一键「点击生成 → 确认 → 自动出片自动播放」全链路自检：
+                    // BuddyBridge 三态检测、不可用申请启动、一次确认自动提交、工单字段。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.AutoGenFlow(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --autogentest：\r\n" + detail);
+                        Log.Note("自检 --autogentest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -1966,6 +1989,14 @@ namespace WallpaperManager
         public void RegenCloud(WallpaperItem it)
         {
             if (it == null) return;
+            // 11-15：积分通道只需一次确认。生成前检测、积分量级、无水印规范
+            // 全在 StartBuddyGen 那个「确认生成」框里，这里不再叠第二层确认。
+            if (IsBuddyChannel())
+            {
+                forceRegenId = "";
+                StartBuddyGen(it, true);
+                return;
+            }
             string cur = VideoFor(it);
             string body = "这张已经有飘动视频了，重新生成会再花一次钱。\r\n\r\n"
                 + "当前片子：" + (string.IsNullOrEmpty(cur) ? "（没找到）" : cur) + "\r\n\r\n"
@@ -1985,14 +2016,8 @@ namespace WallpaperManager
                 return;
             }
 
-            // 11-15：「重新生成一片」也走默认通道（同样优先 WorkBuddy 积分），
-            // 会先提醒「再消耗一次积分」；旧片不删不改名。
-            if (IsBuddyChannel())
-            {
-                forceRegenId = "";
-                StartBuddyGen(it, true);
-                return;
-            }
+            // 这里是显式切成「服务商 API Key」之后的付费直连重出路径，
+            // 仍要过 AskCloudConfig「没配 Key 不许写假工单」的总闸。
             forceRegenId = it.Id;
             if (win == null)
             {
@@ -2025,11 +2050,13 @@ namespace WallpaperManager
             int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
                     ? Config.GenSeconds : CloudGen.MaxSeconds;
             string text = CloudGen.BuildBuddyRequest(it, img, Config.LibRoot, sec);
+            LastCopiedText = text;
             try
             {
                 Clipboard.SetText(text);
                 if (win != null) win.SetStatus(
-                    "已复制指令：粘到 WorkBuddy 会话即可让 Buddy 代出片（视频生成消耗积分，不是 Hy4/Hy3 对话免费额度）");
+                    "已复制指令（手动兜底，一般用不到）：正常点「云端生成」一次确认就会自动出片；"
+                    + "粘到 WorkBuddy 会话也可代出片（消耗积分，不是 Hy4/Hy3 对话免费额度）");
                 Log.Note("已复制 WorkBuddy 代出片指令：" + it.Id + "（未下单、未发请求、未扣费）");
             }
             catch (Exception ex)
@@ -2046,12 +2073,20 @@ namespace WallpaperManager
         }
 
         /// <summary>
-        /// 11-15：云端生成的**默认通道** —— 优先消耗 WorkBuddy 积分。
-        /// 一次点击会真做四件事：告知积分消耗 → 登记待领工单（独立目录，绝不被直连线程误提交）
-        /// → 把出片指令放进剪贴板 → 卡片状态变成「等 Buddy 出片」。
-        /// 片子按约定落到 videos\&lt;id&gt;.mp4 后 SweepBuddyJobs 自动收货、自动换桌面。
+        /// 11-15 改版：云端生成的**默认通道** —— 一次确认即全自动。
+        /// 主人明确要求「点击生成 → 只需确认是否生成 → 确认后直接出片自动播放」，
+        /// 且「生成之前要检测 WorkBuddy 是否启动可用，可用直接生成，不可用申请启动」。
+        ///
+        /// 流程：生成前 BuddyBridge.Check() 三态检测 → 弹**唯一一次**「确认生成」
+        /// （检测结果、积分量级、无水印规范都写在这个框里）→ 不可用则点「是」时先申请
+        /// 启动客户端 → 自动登记待领工单（独立目录，绝不被直连线程误提交）
+        /// → 卡片「等 Buddy 出片」→ 客户端自动领单出片 → 片子落到 videos\&lt;id&gt;.mp4
+        /// 后 SweepBuddyJobs 自动收货、标动态、自动换上桌面并播放。
+        ///
+        /// 不再写系统剪贴板、不再要求复制粘贴、不再需要手动开任务。
         /// 这一步不向服务商发请求、不写 queue 工单、不扣任何积分；
-        /// 真出片由 WorkBuddy 会话（手动粘贴指令 / 自动领单）确认后执行。
+        /// 真出片由客户端里的 WorkBuddy 会话完成，程序里这一次确认就是授权，不再二次确认。
+        /// 启动失败 / 提交失败都如实提示，绝不留下假「生成中」。
         /// </summary>
         public void StartBuddyGen(WallpaperItem it)
         {
@@ -2082,63 +2117,283 @@ namespace WallpaperManager
             string text = CloudGen.BuildBuddyRequest(it, img, Config.LibRoot, sec);
             string target = CloudGen.VideoPath(Config.LibRoot, it.Id);
 
+            // 11-15 深夜：主人要的是「点了程序直接请求 WorkBuddy 出片」，
+            // 不是排队等每小时一次的领单。客户端自带 codebuddy CLI 且内置 VideoGen，
+            // 所以优先走 CLI 直连：程序起一个会话，直接把这把片子做出来。
+            string cliWhy;
+            bool cliOk = BuddyCli.Available(Config, out cliWhy);
+
+            // 11-15：生成之前先检测，可用直接生成，不可用在同一次确认里申请启动
+            string readyReason;
+            BuddyBridge.ReadyState ready = BuddyBridge.Check(out readyReason);
+            LastReadyState = ready.ToString();
+            // 上一次领单会话到底是好的还是被挡回去了 —— 直接写进这次确认框，
+            // 别再让主人点了生成之后干等却不知道发生了什么（429 额度就是这样被藏起来的）。
+            string pickerFail = BuddyBridge.LastPickerFailure(24 * 60);
+            string action;
+            if (cliOk)
+            {
+                action = "点「是」：程序立刻启动 WorkBuddy 的 codebuddy CLI 会话，\r\n"
+                       + "          由它直接调用 VideoGen 把这张图做成动态视频 ——\r\n"
+                       + "          不用等整点领单、不用复制指令、不用手动开任务。\r\n"
+                       + "          成片落到 videos\\ 后，程序 3 秒内自动收单并换上桌面播放。\r\n";
+            }
+            else if (ready == BuddyBridge.ReadyState.NoClient)
+            {
+                action = "点「是」：先申请启动 WorkBuddy 客户端，再自动提交工单；\r\n"
+                       + "          客户端就绪后由自动领单任务生成 mp4，到货自动换上桌面并播放。\r\n"
+                       + "          不用复制指令、不用手动开任务；启动失败会如实提示，不写工单、不扣积分。\r\n"
+                       + "          （" + cliWhy + "，所以本次走工单排队）\r\n";
+            }
+            else
+            {
+                action = "点「是」：立即提交工单。注意自动领单任务本轮没有心跳，\r\n"
+                       + "          可能要到下一次领单才动；等不到就在卡片右键看「工单没人领」。\r\n"
+                       + "          不用复制指令、不用手动开任务，到货自动换上桌面并播放。\r\n"
+                       + "          （" + cliWhy + "，所以本次走工单排队）\r\n";
+            }
+
             string body = (regen
-                    ? "「重新生成一片」会再消耗一次 WorkBuddy 积分，旧片保留。\r\n\r\n" : "")
-                + "出片通道：优先 WorkBuddy 积分（不花服务商的钱、不用填 API Key）。\r\n\r\n"
-                + "点「是」：登记待领工单 + 把出片指令复制到剪贴板；\r\n"
-                + "         粘到 WorkBuddy 会话（或等客户端自动领单）后才会真的生成 mp4。\r\n"
-                + "点「否」：改用服务商 API Key（按秒付费），本次不出片。\r\n"
-                + "点「取消」：什么都不做。\r\n\r\n"
+                    ? "「重新生成一片」会再消耗一次 WorkBuddy 积分，旧片保留备份。\r\n\r\n" : "")
+                + "出片通道：优先 WorkBuddy 积分（不花服务商的钱、不用填 API Key）。\r\n"
+                + "生成前检测：" + readyReason + "\r\n"
+                + (string.IsNullOrEmpty(pickerFail)
+                    ? "上次领单结局：没读到失败记录\r\n"
+                    : "上次领单结局：失败 —— " + pickerFail + "\r\n"
+                      + "          （不是没提交，是领单会话被挡回去了；这一次照样会提交）\r\n")
+                + "\r\n"
+                + action
+                + "点「否」：取消本次生成，什么都不做、不扣积分。\r\n\r\n"
                 + "费用：视频生成走多模态模型，会消耗 WorkBuddy 积分"
                 + "（约 50~100 积分 / 5 秒，3 秒片按比例，实际以客户端提示为准）；"
                 + "Hy4 / Hy3 的对话免费额度不包含出片。\r\n"
-                + "现在这一步只登记工单和复制文字：不提交、不扣积分、不改壁纸库文件，"
-                + "也不会向服务商发请求。\r\n"
-                + "积分通道需要 WorkBuddy 客户端开着（自动领单在客户端里跑）；客户端没开时"
-                + "工单会留着等，不会自动出片。想完全不打开它也能出片，"
-                + "请在设置里切成「服务商 API Key」按秒付费直连。\r\n\r\n"
+                + "出片规范：" + CloudGen.NoWatermarkRuleCn + "\r\n"
+                + (cliOk
+                    ? "通道：" + cliWhy + "\r\n"
+                      + "现在这一步会真的出片：程序起一个 CLI 会话直接调 VideoGen（消耗 WorkBuddy 积分），\r\n"
+                      + "不写系统剪贴板、不向第三方服务商发请求、不改壁纸库其它文件。\r\n"
+                    : "通道：工单排队（" + cliWhy + "）\r\n"
+                      + "现在这一步只提交工单：不写系统剪贴板、不向服务商发请求、不扣任何积分、\r\n"
+                      + "不改壁纸库文件；真出片由客户端里的 WorkBuddy 会话完成。\r\n")
+                + "你在这次确认里已经授权本次出片，客户端不会再向你要第二次确认。\r\n"
+                + "积分通道依赖 WorkBuddy 客户端在运行（自动领单任务在客户端里跑）；"
+                + "想完全不打开它也能出片，请在设置里切成「服务商 API Key」按秒付费直连。\r\n\r\n"
                 + "目标文件：" + target + "\r\n"
                 + "待领工单目录：" + CloudGen.BuddyDir;
             LastBuddyDialog = body;
             BuddyDialogCount++;
-            Log.Note("WorkBuddy 积分通道：已告知积分消耗（" + it.Id + "），未扣费");
+            Log.Note("WorkBuddy 积分通道：生成前检测=" + ready + "（" + it.Id + "），已告知积分消耗，未扣费");
 
             MessageBoxResult r = SelfTestNoBuddyDialogs
                 ? SelfTestBuddyAnswer
-                : MessageBox.Show(body, "壁纸管家 · 用 WorkBuddy 积分出片",
-                                  MessageBoxButton.YesNoCancel, MessageBoxImage.Information,
+                : MessageBox.Show(body, "壁纸管家 · 确认生成（WorkBuddy 积分出片）",
+                                  MessageBoxButton.YesNo, MessageBoxImage.Information,
                                   MessageBoxResult.Yes);
-            if (r == MessageBoxResult.Cancel)
+            if (r != MessageBoxResult.Yes)
             {
-                if (win != null) win.SetStatus("已取消：没下单、没扣积分、没改文件");
-                return;
-            }
-            if (r == MessageBoxResult.No)
-            {
-                if (win != null) win.SetStatus(
-                    "本次没出片；要用按秒付费，请在「设置 → 出片通道」切成服务商 API Key 并填 Key");
-                if (!SelfTestNoBuddyDialogs) OpenSettings();
+                if (win != null) win.SetStatus("已取消生成：没提交、没扣积分、没改文件");
                 return;
             }
 
+            // CLI 直连优先：真出片的就是这条路，不再走工单排队
+            if (cliOk)
+            {
+                string cdetail;
+                bool started = BuddyCli.TryStart(Config, it, img, sec, target, out cdetail);
+                if (started)
+                {
+                    pendingApplyId = it.Id;   // 到货自动换桌面
+                    if (win != null)
+                    {
+                        win.SetStatus("WorkBuddy 正在出片（CLI 直连）：完成后自动换上桌面并播放");
+                        win.RefreshList();
+                    }
+                    Log.Note("WorkBuddy CLI 直连出片：" + it.Id + " " + cdetail);
+                    return;
+                }
+                // 起不来（多半是还没授权）：如实说清楚，并退回工单排队兜底
+                Log.Note("WorkBuddy CLI 直连不可用：" + cdetail + "；退回工单排队");
+                // 未授权是最常见的一种：以前这里只改一行状态栏，主人看到的就是
+                // 「点了一点动静都没有，卡片还在等出片」。现在必须弹窗把话说清、给出口。
+                if (cdetail.IndexOf("还没授权") >= 0)
+                {
+                    string q = "这次没能直接出片：WorkBuddy 的 codebuddy CLI 还没授权。\r\n\r\n"
+                        + cdetail + "\r\n\r\n"
+                        + "点「是」：现在打开授权窗口，在里面输入 /login 回车，浏览器点一下授权；\r\n"
+                        + "          授权完之后再点一次「云端生成」，程序就会直接调 VideoGen 出片。\r\n"
+                        + "点「否」：这次改成排队等客户端自动领单，到货同样自动换上桌面播放。";
+                    LastAuthPrompt = q;
+                    MessageBoxResult ar = SelfTestNoBuddyDialogs
+                        ? SelfTestBuddyAnswer
+                        : MessageBox.Show(q, "壁纸管家 · 需要授权一次（只需一次）",
+                                          MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                                          MessageBoxResult.Yes);
+                    if (ar == MessageBoxResult.Yes)
+                    {
+                        // 自检不许真弹控制台窗口；真实环境才去开。
+                        if (!SelfTestNoBuddyDialogs)
+                        {
+                            string ad;
+                            BuddyCli.OpenLoginConsole(Config, out ad);
+                            if (win != null) win.SetStatus(ad);
+                            Log.Note("WorkBuddy CLI 未授权：已打开授权窗口，本次不写工单");
+                        }
+                        else if (win != null) win.SetStatus("自检：未授权引导，未真正开窗口");
+                        return;   // 已引导去授权，本次不再写工单，免得又堆一张没人领的单
+                    }
+                }
+                if (win != null) win.SetStatus(cdetail + "；已退回工单排队，到货会自动播放");
+            }
+
+            // 不可用：这一下「是」同时授权申请启动客户端；起不来就不写工单，绝不留假状态
+            if (ready == BuddyBridge.ReadyState.NoClient)
+            {
+                string detail;
+                if (!BuddyBridge.TryLaunch(Config, out detail))
+                {
+                    LastLaunchDetail = detail;
+                    if (win != null) win.SetStatus("已取消出片：" + detail);
+                    Log.Note("!! WorkBuddy 不可用且申请启动未成功，未提交工单：" + detail);
+                    return;
+                }
+                LastLaunchDetail = detail;
+                Log.Note("生成前检测：客户端未运行，" + detail);
+            }
+            else LastLaunchDetail = "无需启动（客户端已就绪）";
+
             string err;
             bool wrote = CloudGen.WriteBuddyJob(Config, it, img, sec, out err);
-            LastCopiedText = text;
-            if (!SelfTestNoClipboard)
-            {
-                try { Clipboard.SetText(text); }
-                catch (Exception ex) { Log.Note("!! 复制 WorkBuddy 指令失败：" + ex.Message); }
-            }
-            pendingApplyId = it.Id;     // 到货自动换桌面，纯内存，不写 config
+            LastSubmitText = text;   // 只记录文本，不再写系统剪贴板
+            pendingApplyId = it.Id;  // 到货自动换桌面，纯内存，不写 config
+            // 提交成功 ≠ 会出片：只有领单心跳新鲜才敢说「会自动出片」，
+            // 否则如实说「排着队但没人领」，别再造一次 02:50 那种干等。
+            bool workerAlive = BuddyBridge.HeartbeatFresh();
             if (win != null)
             {
-                win.SetStatus(wrote
-                    ? "WorkBuddy 积分通道：已登记待领工单、指令已复制（没扣积分）；确认出片后自动换上桌面"
-                    : "登记待领工单失败：" + err);
-                win.RefreshList();      // 让卡片立刻显示「等 Buddy 出片」
+                win.SetStatus(!wrote
+                    ? "自动提交失败：" + err
+                    : workerAlive
+                        ? "已自动提交：领单任务在跑，出片后自动换上桌面播放（没扣积分）"
+                        : "工单已排队，但当前没有领单会话在跑：卡片会标「⚠ 未领单」，右键看原因");
+                win.RefreshList();   // 让卡片立刻显示「等 Buddy 出片」/「未领单」
             }
-            Log.Note("WorkBuddy 积分通道：" + it.Id + " 工单=" + wrote
-                     + " 指令=" + text.Length + " 字符；未提交、未扣积分");
+            Log.Note("WorkBuddy 积分通道：" + it.Id + " 检测=" + ready
+                     + " 工单=" + wrote + " 领单心跳=" + workerAlive
+                     + " 指令=" + text.Length + " 字符；未提交服务商、未扣积分");
+        }
+
+        /// <summary>
+        /// 11-15 晚饭后：主人问「为啥没有会话领单，点完只显示等待，两边都没反应」。
+        /// 查清的真原因是两件事叠在一起：
+        ///   ① 自动领单任务只在客户端运行期间才会跑，客户端关着的那几轮全部作废（记成 missed）；
+        ///   ② 客户端今天 19:23 启动时补跑了一次，但会话 21 秒就被模型侧 429 额度限流打回，
+        ///      一句话都没执行 —— 工单没人动、心跳没刷新，程序还挂着「等 Buddy 出片」。
+        /// 所以这个方法把三件事一次说清：客户端在不在、心跳几点、上次领单到底报了什么。
+        ///
+        /// 11-15 21:00 主人补一句「触发未领单后要能申请重新生成，现在做不到」——
+        /// 之前客户端开着时这里只有一个 OK，是死路。现在两种情形都给「重新提交」：
+        /// 点「是」= 作废旧工单 → 必要时拉起客户端 → 重新排队（角标立刻从⚠回到⏳）。
+        /// </summary>
+        public void ShowBuddyStuck(WallpaperItem it)
+        {
+            if (it == null) return;
+            bool client = BuddyBridge.ClientAlive();
+            bool hb = BuddyBridge.HeartbeatFresh();
+            double age = CloudGen.BuddyJobAgeMinutes(it.Id);
+            string fail = BuddyBridge.LastPickerFailure(24 * 60);
+            LastStuckDialog = "";
+            string body = "工单：" + it.Id + "\r\n"
+                + "排队时长：" + (age < 1 ? "刚提交" : ((int)age) + " 分钟") + "\r\n\r\n"
+                + "WorkBuddy 客户端：" + (client ? "在运行" : "没在运行") + "\r\n"
+                + "自动领单心跳：" + (hb ? "新鲜（领单任务在跑）" : "不新鲜（领单任务没跑过）") + "\r\n"
+                + "上次领单结局：" + (string.IsNullOrEmpty(fail) ? "没读到失败记录" : fail) + "\r\n\r\n"
+                + "结论：" + (client
+                    ? (string.IsNullOrEmpty(fail)
+                        ? "客户端开着但领单任务没跑；等它下一次运行就会动。"
+                        : "客户端开着，但领单会话被挡回去了 —— 片子没有生成，工单还在。")
+                    : "客户端没在运行，所以没有任何会话能领这张单（自动领单是客户端里的任务，"
+                      + "程序自身不能生成视频）。")
+                + "\r\n\r\n"
+                + "点「是」：重新提交这张出片工单 —— 作废旧的"
+                + (client ? "，按当前状态重新排队，等客户端领单。\r\n"
+                          : "，先把 WorkBuddy 拉起来，再重新排队。\r\n")
+                + "          重新提交等于重新出片，会再次消耗积分；"
+                + (string.IsNullOrEmpty(fail) ? "" : "额度类限流请等上面提示的重置时间。")
+                + "\r\n点「否」：什么都不做，工单继续留着。\r\n";
+            LastStuckDialog = body;
+
+            MessageBoxResult r = SelfTestNoBuddyDialogs
+                ? SelfTestBuddyAnswer
+                : MessageBox.Show(body, "壁纸管家 · 这张工单为什么没出片",
+                                  MessageBoxButton.YesNo,
+                                  MessageBoxImage.Warning, MessageBoxResult.No);
+            Log.Note("查看待领工单状态：" + it.Id + " 客户端=" + client + " 心跳=" + hb
+                     + " 排队=" + (int)age + "分 上次结局=" + (string.IsNullOrEmpty(fail) ? "无" : fail));
+
+            if (r == MessageBoxResult.Yes) ResubmitBuddyJob(it);
+        }
+
+        /// <summary>
+        /// 11-15 21:00：把「重新提交」做成真动作，而不是又弹一个说明框。
+        /// 顺序很重要：先按**提交那一刻**的真实检测决定要不要拉起客户端，
+        /// 再作废旧工单（作废后队列时间从零算，角标才会从「⚠ 未领单」回到「⏳ 等 Buddy 出片」），
+        /// 最后重新写一张工单。任何一步失败都如实说，不留假状态。
+        /// 启动失败时不作废旧工单 —— 旧单还在，至少还能等下一轮，不会把主人手里的东西弄丢。
+        /// 已有片子的情况不该走这里，交给 RegenCloud（先备份旧片、过 API 总闸）。
+        /// </summary>
+        public void ResubmitBuddyJob(WallpaperItem it)
+        {
+            if (it == null) return;
+            if (VideoFor(it) != null) { RegenCloud(it); return; }
+
+            string img = LocalImageFor(it);
+            if (string.IsNullOrEmpty(img))
+            {
+                if (win != null) win.SetStatus("找不到这张图的本地文件，没法重新提交");
+                return;
+            }
+
+            string readyReason;
+            BuddyBridge.ReadyState ready = BuddyBridge.Check(out readyReason);
+            LastReadyState = ready.ToString();
+            if (ready == BuddyBridge.ReadyState.NoClient)
+            {
+                string detail;
+                if (!BuddyBridge.TryLaunch(Config, out detail))
+                {
+                    LastLaunchDetail = detail;
+                    if (win != null) win.SetStatus("没能重新提交：" + detail);
+                    Log.Note("!! 重新提交前申请启动客户端失败，旧工单保留：" + detail);
+                    return;
+                }
+                LastLaunchDetail = detail;
+            }
+            else LastLaunchDetail = "无需启动（客户端已就绪）";
+
+            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
+                    ? Config.GenSeconds : CloudGen.MaxSeconds;
+
+            CloudGen.RemoveBuddyJob(it.Id);          // 先作废，队列时间从零开始
+            string err;
+            bool wrote = CloudGen.WriteBuddyJob(Config, it, img, sec, out err);
+            if (!wrote)
+            {
+                if (win != null) win.SetStatus("重新提交失败：" + err);
+                Log.Note("!! 重新提交出片工单失败：" + err);
+                return;
+            }
+
+            pendingApplyId = it.Id;
+            bool worker = BuddyBridge.HeartbeatFresh();
+            if (win != null)
+            {
+                win.SetStatus(worker
+                    ? "已重新提交：领单任务在跑，出片后自动换上桌面播放（没扣积分）"
+                    : "已重新提交并重新排队：卡片回到「等 Buddy 出片」，领单任务一跑就会动");
+                win.RefreshList();
+            }
+            Log.Note("WorkBuddy 积分通道：重新提交出片工单 " + it.Id
+                     + " 检测=" + ready + " 领单心跳=" + worker + "；未提交服务商、未扣积分");
         }
 
         /// <summary>
@@ -2229,9 +2484,14 @@ namespace WallpaperManager
         internal static bool SelfTestNoBuddyDialogs = false;
         internal static MessageBoxResult SelfTestBuddyAnswer = MessageBoxResult.Cancel;
         internal static string LastBuddyDialog = "";
+        internal static string LastStuckDialog = "";     // 11-15：「为什么没出片」原因框正文，供自检核对
+        internal static string LastAuthPrompt = "";      // 11-15：CLI 未授权引导框正文，供自检核对
         internal static int BuddyDialogCount = 0;
         internal static bool SelfTestNoClipboard = false;
-        internal static string LastCopiedText = "";
+        internal static string LastCopiedText = "";      // 只给「手动兜底：复制指令」用
+        internal static string LastSubmitText = "";      // 11-15：自动提交的指令文本（不写剪贴板）
+        internal static string LastReadyState = "";      // 生成前检测结果，供界面 / 自检核对
+        internal static string LastLaunchDetail = "";    // 「申请启动」结果，失败也不藏
 
         internal static bool SelfTestNoDialogs = false;
         internal static MessageBoxResult SelfTestCloudAnswer = MessageBoxResult.No;
@@ -3033,7 +3293,12 @@ namespace WallpaperManager
                     Log.Note("WorkBuddy 积分通道：到货 " + id + " → " + vid);
                     if (it == null) continue;
 
-                    bool want = (pendingApplyId == id) || (Config.PendingCloudId == id);
+                    // 11-15：到货自动换桌面有三种授权来源 ——
+                    // ① 本次点击生成时记下的 pendingApplyId（App 没重启）；
+                    // ② 付费直连的 PendingCloudId；
+                    // ③ 当前桌面上贴的正是这张静态图（跨重启的积压工单也该自动升级成动态）。
+                    bool want = (pendingApplyId == id) || (Config.PendingCloudId == id)
+                                || (Config.LastId == id);
                     it.Motion = true;
                     it.Effect = 2;
                     // 自检里跑收货时不能真去设系统壁纸 / 拉起播放器
