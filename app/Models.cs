@@ -40,10 +40,6 @@ namespace WallpaperManager
         public int MountMode = 8;               // 挂载层级：8=Progman分层子窗口·DefView之下(官方口径，能上屏+图标可见)；0-7 均实测否决
 
         // v0.5 云端动效
-        // 生成器命令（可选）：应用下单后会带着工单路径起这个程序，比如
-        //   "D:\tools\gen.cmd"  收到参数 "<job.json>"，自己去调云端接口、把 mp4 写到 out 字段。
-        // 留空也完全能用 —— 工单留在 jobs\queue 里，等外面（助手 / 自己的脚本）来取。
-        public string GenCmd = "";
         public int GenSeconds = 3;              // 出片秒数，硬上限 3（多花额度没意义，循环够用）
         // 正在等云端出片的那一条：片子到货后自动换上，重启也不会忘（存在 config 里而不是内存里）
         public string PendingCloudId = "";

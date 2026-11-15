@@ -544,7 +544,6 @@ namespace WallpaperManager
                 long mm = Json.Long(d, "mountMode");
                 if (mm >= 0 && mm <= 8) c.MountMode = (int)mm;
 
-                c.GenCmd = Json.Str(d, "genCmd");
                 long gs = Json.Long(d, "genSeconds");
                 if (gs >= 1 && gs <= CloudGen.MaxSeconds) c.GenSeconds = (int)gs;
                 c.PendingCloudId = Json.Str(d, "pendingCloudId");
@@ -594,7 +593,6 @@ namespace WallpaperManager
                 sb.Append("  \"lastDynamicId\": ").Append(Json.Quote(c.LastDynamicId)).Append(",\r\n");
                 sb.Append("  \"dynamicEnabled\": ").Append(c.DynamicEnabled ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"mountMode\": ").Append(c.MountMode).Append(",\r\n");
-                sb.Append("  \"genCmd\": ").Append(Json.Quote(c.GenCmd)).Append(",\r\n");
                 sb.Append("  \"genSeconds\": ").Append(c.GenSeconds).Append(",\r\n");
                 sb.Append("  \"pendingCloudId\": ").Append(Json.Quote(c.PendingCloudId)).Append(",\r\n");
                 sb.Append("  \"genProvider\": ").Append(Json.Quote(c.GenProvider)).Append(",\r\n");

@@ -78,8 +78,6 @@ namespace WallpaperManager
         readonly ComboBox modelCombo = new ComboBox();    // 模型改成下拉：看得见单价和大概等多久
         readonly ComboBox resBox = new ComboBox();
         readonly TextBlock genEstimate = new TextBlock(); // 「本次约 ¥X · 预计 Y」实时预估
-        // genCmd 只保留字段做老配置兼容，不再有 UI 入口、也不会被拉起（脚本路线已放弃）
-        readonly TextBox genCmdBox = new TextBox();
         ScrollViewer scroller;
         Button expBtn;                       // 导出/导入按钮：自检要能真实触发它们的 Click
         Button impBtn;
@@ -134,102 +132,6 @@ namespace WallpaperManager
             sub.Foreground = TextDim;
             root.Children.Add(sub);
 
-            // WorkBuddy 出片通道（11-15 深夜：程序直接调客户端自带的 CLI 出片）
-            root.Children.Add(Label("WorkBuddy 出片（CLI 直连）"));
-            TextBlock cliHint = new TextBlock();
-            cliHint.Text = "点「云端生成」时，程序会直接启动客户端自带的 codebuddy CLI 会话，"
-                         + "由它调用 VideoGen 把图做成动态视频 —— 不用等整点领单、不用复制指令。"
-                         + "首次使用需要在弹出的命令行里执行一次 /login 完成授权，之后一直有效。";
-            cliHint.TextWrapping = TextWrapping.Wrap;
-            cliHint.FontSize = 11.5;
-            cliHint.Foreground = TextDim;
-            cliHint.Margin = new Thickness(0, 2, 0, 8);
-            root.Children.Add(cliHint);
-
-            StackPanel cliRow = new StackPanel();
-            cliRow.Orientation = Orientation.Horizontal;
-            Button authBtn = MakeButton("授权出片（首次）");
-            authBtn.Click += delegate
-            {
-                string why;
-                if (!BuddyCli.Available(app.Config, out why))
-                {
-                    MessageBox.Show(why, "WorkBuddy 出片", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-                // 先真探一次再决定要不要登录：已授权就别再折腾主人走一遍 /login。
-                authBtn.IsEnabled = false;
-                authBtn.Content = "检查中…";
-                System.Threading.ThreadPool.QueueUserWorkItem(delegate
-                {
-                    string probe;
-                    bool authed = false;
-                    try { authed = BuddyCli.ProbeAuth(app.Config, out probe); }
-                    catch (Exception ex) { probe = "探测异常：" + ex.Message; }
-                    Dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        authBtn.Content = "授权出片（首次）";
-                        authBtn.IsEnabled = true;
-                        if (authed)
-                        {
-                            MessageBox.Show(this,
-                                "这个通道已经授权好了，不用再登录一次。\r\n\r\n" + probe
-                                + "\r\n\r\n直接点壁纸的「云端生成」就会调它出片。",
-                                "WorkBuddy 出片", MessageBoxButton.OK, MessageBoxImage.Information);
-                            return;
-                        }
-                        string detail;
-                        if (BuddyCli.OpenLoginConsole(app.Config, out detail))
-                        {
-                            MessageBox.Show(this,
-                                "当前状态：" + probe
-                                + "\r\n\r\n" + detail
-                                + "\r\n\r\n在打开的窗口里输入 /login 回车，浏览器里点一下授权，"
-                                + "看到已登录后关掉那个窗口即可。\r\n之后点「云端生成」就会直接出片。",
-                                "WorkBuddy 出片", MessageBoxButton.OK, MessageBoxImage.Information);
-                        }
-                        else
-                        {
-                            MessageBox.Show(this, detail, "WorkBuddy 出片",
-                                MessageBoxButton.OK, MessageBoxImage.Warning);
-                        }
-                    }));
-                });
-            };
-            cliRow.Children.Add(authBtn);
-
-            Button cliTestBtn = MakeButton("检查通道");
-            cliTestBtn.Margin = new Thickness(8, 0, 0, 0);
-            cliTestBtn.Click += delegate
-            {
-                // 真跑一次 CLI 判授权：以前只看文件在不在，永远说「就绪」，白点一轮。
-                cliTestBtn.IsEnabled = false;
-                cliTestBtn.Content = "检查中…";
-                string cliPath = BuddyCli.ScriptPath(app.Config);
-                string nodePath = BuddyCli.NodeExe();
-                System.Threading.ThreadPool.QueueUserWorkItem(delegate
-                {
-                    string probed;
-                    bool ok = false;
-                    try { ok = BuddyCli.ProbeAuth(app.Config, out probed); }
-                    catch (Exception ex) { probed = "探测异常：" + ex.Message; }
-                    string text = (ok ? "通道就绪：" : "通道不可用：") + probed
-                        + "\r\n\r\nCLI 路径：" + cliPath
-                        + "\r\nnode：" + nodePath
-                        + "\r\nCLI 日志：" + BuddyCli.LogPath
-                        + (ok ? "\r\n\r\n点「云端生成」就会直接调它出片。"
-                              : "\r\n\r\n先点「授权出片（首次）」，在弹出的窗口里输入 /login 回车。");
-                    Dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        cliTestBtn.Content = "检查通道";
-                        cliTestBtn.IsEnabled = true;
-                        MessageBox.Show(this, text, "WorkBuddy 出片", MessageBoxButton.OK,
-                            ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
-                    }));
-                });
-            };
-            cliRow.Children.Add(cliTestBtn);
-            root.Children.Add(cliRow);
             root.Children.Add(Separator());
 
             // 壁纸库
@@ -925,7 +827,6 @@ namespace WallpaperManager
             keyBox.Password = c.GenApiKey == null ? "" : c.GenApiKey;
             resBox.SelectedIndex = c.GenResolution == "1080P" ? 1 : 0;
             SelectModelById(c.GenModel);
-            genCmdBox.Text = c.GenCmd == null ? "" : c.GenCmd;   // 老配置兼容保留，不再有 UI 入口
             UpdateEstimate();
         }
 
@@ -976,7 +877,6 @@ namespace WallpaperManager
             GenModelInfo sel = SelectedModel();
             c.GenModel = sel == null ? "" : sel.Id;
             c.GenResolution = resBox.SelectedIndex == 1 ? "1080P" : "720P";
-            c.GenCmd = genCmdBox.Text == null ? "" : genCmdBox.Text.Trim();
             if (c.GenProvider.Length > 0 && c.GenApiKey.Length == 0)
             {
                 MessageBox.Show("选了服务商但还没填 API Key，云端生成现在用不了。\n\n"

@@ -163,50 +163,6 @@ namespace WallpaperManager
             return Path.Combine(QueueDir, id + ".json");
         }
 
-        /// <summary>
-        /// 浮条上只放得下一行，整条命令（还带参数）塞进去会把布局撑坏。
-        /// 这里只取「像程序的那一段」的文件名：gen-motion.bat。
-        /// </summary>
-        public static string GenCmdName(string cmd)
-        {
-            if (string.IsNullOrEmpty(cmd)) return "";
-            string[] parts = cmd.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-            for (int i = 0; i < parts.Length; i++)
-            {
-                string p = parts[i].Trim('"');
-                string ext = Path.GetExtension(p);
-                if (ext == null) continue;
-                ext = ext.ToLowerInvariant();
-                if (ext == ".exe" || ext == ".bat" || ext == ".cmd" || ext == ".ps1" || ext == ".py")
-                    return Path.GetFileName(p);
-            }
-            string s = cmd.Trim().Trim('"');
-            return s.Length <= 26 ? s : s.Substring(0, 26) + "…";
-        }
-
-        /// <summary>
-        /// 找随程序一起发出去的出片脚本：tools\gen-motion.bat。
-        /// 11-13 起本地脚本路线停用、设置面板不再有入口，这个方法只作历史兼容保留，
-        /// 主流程不再调用；genCmd 字段同理只保证老配置读得回来，不会被拉起。
-        /// </summary>
-        public static string FindBundledScript()
-        {
-            try
-            {
-                string dir = AppDomain.CurrentDomain.BaseDirectory;
-                for (int i = 0; i < 5 && !string.IsNullOrEmpty(dir); i++)
-                {
-                    string p = Path.Combine(dir, "tools", "gen-motion.bat");
-                    if (File.Exists(p)) return p;
-
-                    DirectoryInfo up = Directory.GetParent(dir.TrimEnd(Path.DirectorySeparatorChar));
-                    if (up == null) break;
-                    dir = up.FullName;
-                }
-            }
-            catch { }
-            return "";
-        }
 
         /// <summary>
         /// 11-15：主人发现库里倒数第二、第三张的动态视频都带水印，而旧提示词里
