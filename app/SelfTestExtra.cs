@@ -1718,7 +1718,8 @@ namespace WallpaperManager
                 string fakeCliDir = Path.Combine(tmp, @"resources\app.asar.unpacked\cli\bin");
                 Directory.CreateDirectory(fakeCliDir);
                 File.WriteAllText(Path.Combine(fakeCliDir, "codebuddy"), "// selftest fake cli", Encoding.UTF8);
-                BuddyCli.SelfTestNoStart = true;     // 只验分支与文案，绝不起 node
+                BuddyCli.SelfTestAuthOverride = true;   // 授权状态由自检直接指定，不真去请求模型
+                BuddyCli.SelfTestNoStart = true;        // 只验分支与文案，绝不起 node
                 int cliStartBefore = BuddyCli.StartCount;
                 app.StartBuddyGen(still);
                 Hit(sb, ref pass, ref total, "CLI 通道在时确认框写明由程序直接调 VideoGen",
@@ -1732,23 +1733,44 @@ namespace WallpaperManager
                 // 收掉假 CLI，后面的用例回到「工单排队」通道，避免两条通道互相串味
                 try { Directory.Delete(Path.Combine(tmp, "resources"), true); } catch { }
 
-                // ---- 三·三、CLI 未授权：必须弹窗说清并给出口，不许只改一行状态栏 ----
+                // ---- 三·三、CLI 未授权：必须说清，不许只改一行状态栏 ----
                 // 主人原话：「我点击之后只显示等待生成，WorkBuddy 和壁纸程序啥反应没有」。
+                // 分两种：客户端带了交互界面 → 引导授权、本次不写工单；
+                //           没带交互界面（这台机器就是）→ 如实说登不了、继续排队兜底。
                 Directory.CreateDirectory(fakeCliDir);
                 File.WriteAllText(Path.Combine(fakeCliDir, "codebuddy"), "// selftest fake cli", Encoding.UTF8);
-                BuddyCli.SelfTestForceFail = "WorkBuddy CLI 还没授权：需要一次性登录"
-                                           + "（设置里点「授权出片」，或在命令行执行 /login）";
+                BuddyCli.SelfTestAuthOverride = false;   // 明确「未授权」
+                BuddyCli.SelfTestNoStart = false;
+
+                // A) 没有交互界面：不许假装还能授权
+                //    照这台机器的真实样子铺：cli\dist 里只有精简版 lite-wb，没有 codebuddy.js
+                string fakeDist = Path.Combine(tmp, @"resources\app.asar.unpacked\cli\dist");
+                Directory.CreateDirectory(fakeDist);
+                File.WriteAllText(Path.Combine(fakeDist, "codebuddy-lite-wb.mjs"),
+                                  "// selftest fake lite bundle", Encoding.UTF8);
                 App.LastAuthPrompt = "";
                 CloudGen.RemoveBuddyJob(still.Id);
                 app.StartBuddyGen(still);
-                Hit(sb, ref pass, ref total, "CLI 未授权时弹出引导框（不再只改状态栏）",
+                Hit(sb, ref pass, ref total, "CLI 未授权且没有交互界面时如实说明登不了",
+                    App.LastAuthPrompt.IndexOf("没法登录") >= 0
+                    && App.LastAuthPrompt.IndexOf("精简版") >= 0, App.LastAuthPrompt);
+                Hit(sb, ref pass, ref total, "这种情况改走排队兜底（仍写工单）",
+                    File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
+                CloudGen.RemoveBuddyJob(still.Id);
+
+                // B) 有交互界面：引导授权，点「是」时不写工单
+                File.WriteAllText(Path.Combine(fakeDist, "codebuddy.js"),
+                                  "// selftest fake tui bundle", Encoding.UTF8);
+                App.LastAuthPrompt = "";
+                app.StartBuddyGen(still);
+                Hit(sb, ref pass, ref total, "CLI 未授权但有交互界面时弹出授权引导",
                     App.LastAuthPrompt.IndexOf("/login") >= 0
                     && App.LastAuthPrompt.IndexOf("授权窗口") >= 0, "");
-                Hit(sb, ref pass, ref total, "未授权引导框给出「再点一次云端生成」的明确出口",
+                Hit(sb, ref pass, ref total, "引导框给出「再点一次云端生成」的明确出口",
                     App.LastAuthPrompt.IndexOf("再点一次") >= 0, "");
                 Hit(sb, ref pass, ref total, "点「是」去授权时本次不写工单（不留没人领的单）",
                     !File.Exists(CloudGen.BuddyJobPath(still.Id)), "");
-                BuddyCli.SelfTestForceFail = "";
+                BuddyCli.SelfTestAuthOverride = null;    // 后面的用例回到「CLI 不可用」的默认态
                 try { Directory.Delete(Path.Combine(tmp, "resources"), true); } catch { }
 
                 // ---- 四、不可用时点「是」= 授权申请启动：启动成功才提交 ----
@@ -1942,6 +1964,7 @@ namespace WallpaperManager
                 App.LastCopiedText = savedCopied;
                 BuddyCli.SelfTestNoStart = false;
                 BuddyCli.SelfTestForceFail = "";
+                BuddyCli.SelfTestAuthOverride = null;
                 RelatedVideo.Invalidate();
                 try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
             }

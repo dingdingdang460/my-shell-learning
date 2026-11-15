@@ -38,6 +38,58 @@ namespace WallpaperManager
         /// <summary>自检用：强制让 TryStart 以这句话失败，用来验「未授权引导」分支。</summary>
         public static string SelfTestForceFail = "";
 
+        /// <summary>自检用：直接指定「是否已授权」，免得自检真去请求模型。</summary>
+        public static bool? SelfTestAuthOverride = null;
+
+        // 授权状态缓存：未授权时 CLI 要 ~10 秒才吐 "Authentication required"，
+        // 而 TryStart 只盯 6 秒就会误判成「正在出片」（假生成中就是这么来的）。
+        // 所以授权与否先由一次探测定下来并缓存，出片入口只认缓存，不去猜。
+        static DateTime _probeAt = DateTime.MinValue;
+        static bool _probeOk = false;
+        static string _probeDetail = "";
+        static int _probing = 0;
+        const int ProbeFreshMinutes = 10;
+
+        /// <summary>缓存里「已确认授权」就返回 true；没探过或过期都算未确认。</summary>
+        public static bool CachedAuthorized(AppConfig cfg, out string detail)
+        {
+            if (SelfTestAuthOverride.HasValue)
+            {
+                _probeOk = SelfTestAuthOverride.Value;
+                detail = _probeOk ? "自检：已授权" : "自检：未授权";
+                return _probeOk;
+            }
+            if ((DateTime.Now - _probeAt).TotalMinutes <= ProbeFreshMinutes)
+            {
+                detail = _probeDetail;
+                return _probeOk;
+            }
+            detail = "还没确认过这条通道的授权状态（后台正在探测，稍后重试即可）。";
+            return false;
+        }
+
+        /// <summary>后台探测一次授权状态，结果进缓存。不占用界面线程。</summary>
+        public static void ProbeAsync(AppConfig cfg)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref _probing, 1, 0) != 0) return;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    string d;
+                    bool ok = ProbeAuth(cfg, out d);
+                    _probeOk = ok;
+                    _probeDetail = d;
+                    _probeAt = DateTime.Now;
+                }
+                catch { }
+                finally { System.Threading.Interlocked.Exchange(ref _probing, 0); }
+            });
+        }
+
+        /// <summary>清掉缓存（授权成功后要立刻重新探测）。</summary>
+        public static void InvalidateAuthCache() { _probeAt = DateTime.MinValue; }
+
         /// <summary>定位客户端安装根目录（由 WorkBuddy.exe 反推）。</summary>
         static string ClientRoot(AppConfig cfg)
         {
@@ -160,27 +212,12 @@ namespace WallpaperManager
                 return false;
             }
 
-            string node = NodeExe();
             string script = ScriptPath(cfg);
             string prompt = BuildPrompt(image, seconds, target);
-            string args = Quote(script) + " -p " + Quote(prompt)
-                        + " -y --output-format json";
 
             try
             {
-                ProcessStartInfo psi = new ProcessStartInfo(node, args);
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                psi.WorkingDirectory = Path.GetTempPath();
-                psi.RedirectStandardOutput = true;
-                psi.RedirectStandardError = true;
-                psi.StandardOutputEncoding = Encoding.UTF8;
-                psi.StandardErrorEncoding = Encoding.UTF8;
-                // 11-15 实测：CLI 在这台机器上不绕代理会在 setProxy 里抛
-                // "Right-hand side of 'instanceof' is not callable"，整条命令直接跑不起来。
-                // 客户端自己启动时没这问题（它带了完整代理环境），独立起就必须显式禁代理。
-                psi.EnvironmentVariables["NO_PROXY"] = "*";
-                psi.EnvironmentVariables["no_proxy"] = "*";
+                ProcessStartInfo psi = CreatePsi(script, "-y --output-format json");
 
                 Process p = new Process();
                 p.StartInfo = psi;
@@ -201,6 +238,10 @@ namespace WallpaperManager
                 p.Start();
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
+
+                // 出片指令走 stdin：BuildPrompt 里含换行和中文，
+                // 塞进命令行会被 Windows 的引号/换行规则截断，CLI 只能收到半句。
+                WriteStdin(p, prompt);
 
                 DateTime t0 = DateTime.Now;
                 while ((DateTime.Now - t0).TotalSeconds < 6.0)
@@ -255,6 +296,66 @@ namespace WallpaperManager
             return "\"" + (s == null ? "" : s.Replace("\"", "\\\"")) + "\"";
         }
 
+        /// <summary>
+        /// 统一构造启动 CLI 的进程配置。三个坑一次绕掉：
+        ///
+        /// 1) .NET Framework 的 ProcessStartInfo.EnvironmentVariables 是大小写不敏感的
+        ///    StringDictionary，本机环境里 HTTPS_PROXY 与 https_proxy 同时存在，
+        ///    一访问索引器就抛「已添加项。字典中的关键字…」。所以**完全不碰**那个字典，
+        ///    改成落一个临时 .bat 由 cmd 自己 set 环境变量（cmd 内联 /c "…" 的引号嵌套
+        ///    太脆，实测会把 node 路径的引号吃掉，落文件最稳）。
+        /// 2) 客户端这份安装只有 dist\codebuddy-lite-wb.mjs，必须设
+        ///    CODEBUDDY_FORCE_LITE_WB_BUNDLE=1 走 lite-wb 分流；不设就会依次去找
+        ///    dist\codebuddy-headless 与 dist\codebuddy（两个都不存在），最后报
+        ///    "Cannot find module '../dist/codebuddy'"。
+        /// 3) 不绕代理会在 setProxy 里抛 "Right-hand side of 'instanceof' is not callable"。
+        ///
+        /// 指令一律走 stdin（CLI 的 -p 不带参数时读 stdin），bat 里只留短参数。
+        /// </summary>
+        static ProcessStartInfo CreatePsi(string script, string extraArgs)
+        {
+            string bat = Path.Combine(Path.GetTempPath(), "wb-cli-run.bat");
+            StringBuilder sb = new StringBuilder();
+            sb.Append("@echo off\r\n");
+            sb.Append("set CODEBUDDY_FORCE_LITE_WB_BUNDLE=1\r\n");
+            sb.Append("set NO_PROXY=*\r\n");
+            sb.Append("\"");
+            sb.Append(NodeExe());
+            sb.Append("\" \"");
+            sb.Append(script);
+            sb.Append("\" -p ").Append(extraArgs).Append("\r\n");
+            File.WriteAllText(bat, sb.ToString(), new UTF8Encoding(false));
+
+            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c \"" + bat + "\"");
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.WorkingDirectory = Path.GetTempPath();
+            psi.RedirectStandardInput = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
+            return psi;
+        }
+
+        /// <summary>
+        /// 把指令写进 CLI 的 stdin。.NET Framework 没有 StandardInputEncoding，
+        /// 默认编码跟控制台代码页走（本机 GBK），中文会乱码 —— 所以自己包一个 UTF-8 写入器。
+        /// </summary>
+        static void WriteStdin(Process p, string text)
+        {
+            try
+            {
+                using (StreamWriter w = new StreamWriter(p.StandardInput.BaseStream,
+                                                         new UTF8Encoding(false)))
+                {
+                    w.Write(text);
+                    w.Flush();
+                }
+            }
+            catch { }
+        }
+
         static string Trim(string s, int n)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -263,11 +364,36 @@ namespace WallpaperManager
         }
 
         /// <summary>
+        /// 交互界面（TUI）这份客户端到底有没有。11-15 22:25 查清：
+        /// WorkBuddy 安装目录里 cli\dist 只有 codebuddy-lite-wb.mjs（无界面精简版），
+        /// 而 TUI 走的是 require('../dist/codebuddy')，那份文件根本不存在
+        /// （app.asar 里也只打包了 lite-wb 这一份，整个安装没有完整版）。
+        /// 所以「在窗口里输 /login」这条路在这台机器上不可能成，必须提前说清楚，
+        /// 不能把主人引到一个注定报 Cannot find module 的窗口。
+        /// </summary>
+        public static bool TuiAvailable(AppConfig cfg, out string detail)
+        {
+            detail = "";
+            string root = ClientRoot(cfg);
+            if (root.Length == 0) { detail = "找不到 WorkBuddy 安装目录"; return false; }
+            string dist = Path.Combine(root, @"resources\app.asar.unpacked\cli\dist");
+            if (!Directory.Exists(dist)) { detail = "找不到 CLI 的 dist 目录：" + dist; return false; }
+            string[] names = { "codebuddy.js", "codebuddy.cjs", "codebuddy", "codebuddy-headless.js" };
+            for (int i = 0; i < names.Length; i++)
+                if (File.Exists(Path.Combine(dist, names[i]))) return true;
+            detail = "客户端这份 CLI 只带了无界面精简版（dist\\codebuddy-lite-wb.mjs），"
+                   + "缺少交互界面用的 dist\\codebuddy.js，所以在窗口里执行 /login 走不通。";
+            return false;
+        }
+
+        /// <summary>
         /// 让 CLI 自己做一次授权：开一个真实终端（TUI 需要 TTY，管道喂不进去）。
         /// 主人在里面输入 /login，浏览器点一下授权，之后永久有效。
         /// </summary>
         public static bool OpenLoginConsole(AppConfig cfg, out string detail)
         {
+            string tuiWhy;
+            if (!TuiAvailable(cfg, out tuiWhy)) { detail = tuiWhy; return false; }
             string script = ScriptPath(cfg);
             if (script.Length == 0) { detail = "找不到 codebuddy CLI"; return false; }
             string node = NodeExe();
@@ -286,6 +412,10 @@ namespace WallpaperManager
                 sb.Append("chcp 65001 >nul\r\n");
                 sb.Append("set NO_PROXY=*\r\n");
                 sb.Append("set no_proxy=*\r\n");
+                // 客户端这份安装只有 dist\\codebuddy-lite-wb.mjs；不设分流会去找
+                // dist\\codebuddy-headless 和 dist\\codebuddy（都不存在），
+                // 窗口里就只剩 "Cannot find module '../dist/codebuddy'"。
+                sb.Append("set CODEBUDDY_FORCE_LITE_WB_BUNDLE=1\r\n");
                 sb.Append("title WorkBuddy CLI auth - type /login and press Enter\r\n");
                 sb.Append("echo ============================================\r\n");
                 sb.Append("echo  First run needs one-time authorization:\r\n");
@@ -338,20 +468,15 @@ namespace WallpaperManager
             if (!Available(cfg, out why)) { detail = why; return false; }
             try
             {
-                ProcessStartInfo psi = new ProcessStartInfo(NodeExe(),
-                    Quote(ScriptPath(cfg)) + " -p \"reply with the single word pong\" --model hy4free --output-format text");
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                psi.WorkingDirectory = Path.GetTempPath();
-                psi.RedirectStandardOutput = true;
-                psi.RedirectStandardError = true;
-                psi.StandardOutputEncoding = Encoding.UTF8;
-                psi.StandardErrorEncoding = Encoding.UTF8;
-                psi.EnvironmentVariables["NO_PROXY"] = "*";
-                psi.EnvironmentVariables["no_proxy"] = "*";
+                ProcessStartInfo psi = CreatePsi(ScriptPath(cfg),
+                                                 "--model hy4free --output-format text");
+
+                // 把真正的命令行记下来：出问题时第一眼能看到程序是怎么调它的。
+                Log.Note("CLI 探测命令行：" + psi.FileName + " " + psi.Arguments);
 
                 using (Process p = Process.Start(psi))
                 {
+                    WriteStdin(p, "reply with the single word pong");
                     string outText = p.StandardOutput.ReadToEnd();
                     string errText = p.StandardError.ReadToEnd();
                     if (!p.WaitForExit(60000))
@@ -362,6 +487,20 @@ namespace WallpaperManager
                         return false;
                     }
                     string all = (outText + "\n" + errText).Trim();
+                    Log.Note("CLI 探测输出（退出码 " + p.ExitCode + "）：" + Trim(all, 800));
+
+                    // 11-15 22:10 修：以前只要「输出非空且不含 Authentication required」
+                    // 就判已授权，于是 node 报 "Cannot find module '../dist/codebuddy'"
+                    // 也被当成「已授权」，主人白高兴一场。现在先揪错误，再要求真拿到回复。
+                    if (all.IndexOf("Cannot find module", StringComparison.OrdinalIgnoreCase) >= 0
+                        || all.IndexOf("MODULE_NOT_FOUND", StringComparison.OrdinalIgnoreCase) >= 0
+                        || all.IndexOf("ERR_MODULE_NOT_FOUND", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        detail = "CLI 入口加载失败（不是授权问题）：" + Trim(all, 300) + "\r\n"
+                               + "说明客户端这份 CLI 的 bundle 与入口不匹配，需要改用它真正带的那份。";
+                        Log.Note("!! WorkBuddy CLI 入口加载失败：" + Trim(all, 500));
+                        return false;
+                    }
                     if (all.IndexOf("Authentication required", StringComparison.OrdinalIgnoreCase) >= 0
                         || all.IndexOf("Please use /login", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
@@ -376,8 +515,15 @@ namespace WallpaperManager
                         Log.Note("!! WorkBuddy CLI 授权探测空输出，退出码 " + p.ExitCode);
                         return false;
                     }
+                    // 真拿到模型回复才算通：要它答 pong，答别的（报错栈、usage、空壳）一律不算。
+                    if (all.IndexOf("pong", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        detail = "CLI 有输出但没有拿到模型回复，通道异常：" + Trim(all, 300);
+                        Log.Note("!! WorkBuddy CLI 探测输出里没有模型回复");
+                        return false;
+                    }
                     detail = "已授权，CLI 可用。模型回复：" + Trim(all, 120);
-                    Log.Note("WorkBuddy CLI 授权探测：已授权");
+                    Log.Note("WorkBuddy CLI 授权探测：已授权（拿到 pong）");
                     return true;
                 }
             }

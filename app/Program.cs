@@ -849,6 +849,25 @@ namespace WallpaperManager
                     auto.Start();
                     break;
                 }
+                if (string.Equals(s, "--probecli", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-15 22:10：诊断开关。只做一件事——按真实调用方式探一次 CLI，
+                    // 把命令行与原始输出写进日志。出「Cannot find module」这类问题时靠它取证。
+                    DispatcherTimer pr = new DispatcherTimer();
+                    pr.Interval = TimeSpan.FromSeconds(2);
+                    pr.Tick += delegate
+                    {
+                        pr.Stop();
+                        string d;
+                        bool ok = false;
+                        try { ok = BuddyCli.ProbeAuth(Config, out d); }
+                        catch (Exception ex) { d = "异常 " + ex.GetType().Name + "：" + ex.Message; }
+                        Log.Note("自检 --probecli：" + (ok ? "OK" : "NO") + " —— " + d);
+                        Log.Note("自检 --probecli：结束");
+                    };
+                    pr.Start();
+                    break;
+                }
                 if (string.Equals(s, "--importexporttest", StringComparison.OrdinalIgnoreCase))
                 {
                     // 11-14：真点「导出配置…/导入配置…」按钮，验整条链路与零污染。
@@ -2120,8 +2139,31 @@ namespace WallpaperManager
             // 11-15 深夜：主人要的是「点了程序直接请求 WorkBuddy 出片」，
             // 不是排队等每小时一次的领单。客户端自带 codebuddy CLI 且内置 VideoGen，
             // 所以优先走 CLI 直连：程序起一个会话，直接把这把片子做出来。
+            //
+            // 22:35 改：直连的前提是「已确认授权」。未授权时 CLI 要约 10 秒才吐
+            // "Authentication required"，而 TryStart 只盯 6 秒就会误判成正在出片
+            // （假生成中）。所以这里只认缓存里的授权结论，不去猜；没确认过就先排队。
             string cliWhy;
             bool cliOk = BuddyCli.Available(Config, out cliWhy);
+            if (cliOk)
+            {
+                string authWhy;
+                if (!BuddyCli.CachedAuthorized(Config, out authWhy))
+                {
+                    cliOk = false;
+                    // 光说「未授权」没用：得告诉主人这条通道现在到底能不能救。
+                    // 这台机器的客户端只带无界面精简版，登录无门，必须如实写进确认框。
+                    string tuiWhy;
+                    string note = authWhy;
+                    if (!BuddyCli.TuiAvailable(Config, out tuiWhy))
+                        note += "；而且这条通道现在没法登录：" + tuiWhy;
+                    else
+                        note += "；可以点「授权出片（首次）」在窗口里执行一次 /login。";
+                    cliWhy = note;
+                    LastAuthPrompt = note;
+                    BuddyCli.ProbeAsync(Config);   // 顺手让后台再确认一次，下次点就准了
+                }
+            }
 
             // 11-15：生成之前先检测，可用直接生成，不可用在同一次确认里申请启动
             string readyReason;
@@ -2211,14 +2253,19 @@ namespace WallpaperManager
                     Log.Note("WorkBuddy CLI 直连出片：" + it.Id + " " + cdetail);
                     return;
                 }
-                // 起不来（多半是还没授权）：如实说清楚，并退回工单排队兜底
+                // 真起不来（授权刚好失效 / CLI 自身报错）：如实说，退回工单兜底
                 Log.Note("WorkBuddy CLI 直连不可用：" + cdetail + "；退回工单排队");
-                // 未授权是最常见的一种：以前这里只改一行状态栏，主人看到的就是
-                // 「点了一点动静都没有，卡片还在等出片」。现在必须弹窗把话说清、给出口。
-                if (cdetail.IndexOf("还没授权") >= 0)
+                if (win != null) win.SetStatus(cdetail + "；已退回工单排队，到货会自动播放");
+            }
+            else if (LastAuthPrompt.Length > 0)
+            {
+                // 通道在、只是没确认授权。能登录就给一次「去授权」的机会；
+                // 登录无门（这台机器就是）就明说，然后继续排队兜底，绝不假装在出片。
+                string tuiWhy;
+                if (BuddyCli.TuiAvailable(Config, out tuiWhy))
                 {
-                    string q = "这次没能直接出片：WorkBuddy 的 codebuddy CLI 还没授权。\r\n\r\n"
-                        + cdetail + "\r\n\r\n"
+                    string q = "这次没能直接出片：WorkBuddy 的 codebuddy CLI 还没确认授权。\r\n\r\n"
+                        + cliWhy + "\r\n\r\n"
                         + "点「是」：现在打开授权窗口，在里面输入 /login 回车，浏览器点一下授权；\r\n"
                         + "          授权完之后再点一次「云端生成」，程序就会直接调 VideoGen 出片。\r\n"
                         + "点「否」：这次改成排队等客户端自动领单，到货同样自动换上桌面播放。";
@@ -2242,7 +2289,12 @@ namespace WallpaperManager
                         return;   // 已引导去授权，本次不再写工单，免得又堆一张没人领的单
                     }
                 }
-                if (win != null) win.SetStatus(cdetail + "；已退回工单排队，到货会自动播放");
+                else if (!SelfTestNoBuddyDialogs)
+                {
+                    MessageBox.Show("这次没能直接出片。\r\n\r\n" + cliWhy
+                        + "\r\n\r\n所以本次改为排队等客户端自动领单，到货同样自动换上桌面播放。",
+                        "壁纸管家 · 出片通道说明", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
 
             // 不可用：这一下「是」同时授权申请启动客户端；起不来就不写工单，绝不留假状态
