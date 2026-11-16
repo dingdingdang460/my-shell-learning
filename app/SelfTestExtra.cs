@@ -2141,6 +2141,7 @@ namespace WallpaperManager
 
             // 记账口径：删除要回报「几个进了回收站」，界面才敢说「可还原」
             bool tallyOk = false;
+            bool adoptTitleOk = false;
             string libTmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-lib-" + Environment.TickCount);
             try
             {
@@ -2167,6 +2168,15 @@ namespace WallpaperManager
                   .Append(" 永久=").Append(dr.Vanished)
                   .Append(" 失败=").Append(dr.Failed)
                   .Append(" 未确认=").Append(dr.Unverified).Append("）\r\n");
+
+                // 模拟「从回收站还原」：只把文件放回 images\，索引里依然没有它。
+                // 收编时标题必须从 .trash\entries.json 捡回来，不能退化成一串 id。
+                File.WriteAllText(Path.Combine(libTmp, "images", "zz-guard-1.jpg"), "x", new UTF8Encoding(false));
+                List<WallpaperItem> back = LibraryStore.Load(libTmp);
+                string gotTitle = "";
+                for (int i = 0; i < back.Count; i++) if (back[i].Id == "zz-guard-1") gotTitle = back[i].Title;
+                adoptTitleOk = (gotTitle == "guard");
+                sb.Append("  （还原后标题：").Append(gotTitle.Length == 0 ? "（没收录）" : gotTitle).Append("）\r\n");
             }
             catch (Exception ex)
             {
@@ -2177,6 +2187,45 @@ namespace WallpaperManager
                 try { if (Directory.Exists(libTmp)) Directory.Delete(libTmp, true); } catch { }
             }
             Hit(sb, ref pass, ref total, "删除回报账目：两个文件都记账为「已进回收站」", tallyOk, "");
+            Hit(sb, ref pass, ref total, "还原后刷库收编：标题从删除存档里捡回来，不是一串 id", adoptTitleOk, "");
+
+            // 11-16 晚：从回收站还原回来的图，刷新库必须能看见。
+            // 还原只把文件放回 images\，索引里没有它 —— 全靠 Load 的「散图收编」这一段。
+            // 这段以前没有任何自检覆盖，主人报「还原后刷新库没回来」时才现发现是个盲区。
+            bool adoptOk = false;
+            bool adoptTitle = false;
+            string libTmp2 = Path.Combine(Path.GetTempPath(), "wb-guardtest-adopt-" + Environment.TickCount);
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(libTmp2, "images"));
+                // 还原回来的文件按原 id 落盘（回收站还原就是这个名字）
+                File.WriteAllBytes(Path.Combine(libTmp2, "images", "restored-1.jpg"),
+                    new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0 });
+
+                List<WallpaperItem> got = LibraryStore.Load(libTmp2);
+                for (int i = 0; i < got.Count; i++)
+                {
+                    if (got[i].Id == "restored-1")
+                    {
+                        adoptOk = true;
+                        // 收编出来的标题现在是 id；删前记下的原标题能不能找回来另说，
+                        // 至少不能是空标题、也不能指向不存在的文件
+                        adoptTitle = got[i].Title.Length > 0 && got[i].ImagePath != null
+                                     && File.Exists(got[i].ImagePath);
+                    }
+                }
+                sb.Append("  （还原收编：库内条目 ").Append(got.Count).Append(" 条）\r\n");
+            }
+            catch (Exception ex)
+            {
+                sb.Append("  （还原收编测试异常：").Append(ex.Message).Append("）\r\n");
+            }
+            finally
+            {
+                try { if (Directory.Exists(libTmp2)) Directory.Delete(libTmp2, true); } catch { }
+            }
+            Hit(sb, ref pass, ref total, "还原回来的图（只在 images、没有索引）刷新库能收编", adoptOk, "");
+            Hit(sb, ref pass, ref total, "收编条目有标题、图片路径真实存在", adoptTitle, "");
 
             // ---- 五、配置字段往返 ----
             string tmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-cfg.json");

@@ -105,6 +105,7 @@ namespace WallpaperManager
             string imgDir = Path.Combine(root, "images");
             if (Directory.Exists(imgDir))
             {
+                Dictionary<string, Dictionary<string, object>> arch = null;
                 string[] exts = new string[] { ".jpg", ".jpeg", ".png", ".bmp" };
                 foreach (string f in Directory.GetFiles(imgDir))
                 {
@@ -126,11 +127,132 @@ namespace WallpaperManager
                     it.ImagePath = f;
                     it.ThumbAbs = f;
                     it.Bytes = new FileInfo(f).Length;
+
+                    // 11-16 晚：这张很可能是「删掉又从回收站还原」的。删除时在
+                    // .trash\entries.json 里存了原标题 / 收藏 / 动效，还原只把文件放回来，
+                    // 索引里没有它 —— 不把标题捡回来，卡片就是一串 biliart-xxxx，
+                    // 主人只会觉得「根本没回来」。存档按需加载，没有散图就不读盘。
+                    if (arch == null) arch = LoadTrashArchive(root);
+                    Dictionary<string, object> rec;
+                    if (arch.TryGetValue(id, out rec)) ApplyArchive(it, root, rec);
                     list.Add(it);
                 }
             }
 
             return list;
+        }
+
+        /// <summary>删除时留下的条目存档：.trash\entries.json（按 id 存，同 id 只留最新一条）</summary>
+        static string TrashArchivePath(string root)
+        {
+            return Path.Combine(Path.Combine(root, ".trash"), "entries.json");
+        }
+
+        static Dictionary<string, Dictionary<string, object>> LoadTrashArchive(string root)
+        {
+            Dictionary<string, Dictionary<string, object>> map =
+                new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string file = TrashArchivePath(root);
+                if (!File.Exists(file)) return map;
+                object[] arr = Json.AsArr(Json.Parse(File.ReadAllText(file, Encoding.UTF8)));
+                if (arr == null) return map;
+                foreach (object o in arr)
+                {
+                    Dictionary<string, object> d = Json.AsDict(o);
+                    if (d == null) continue;
+                    string id = Json.Str(d, "id");
+                    if (id.Length == 0) continue;
+                    map[id] = d;
+                }
+            }
+            catch { }
+            return map;
+        }
+
+        /// <summary>把存档里的标题 / 标签 / 收藏 / 动效套回收编出来的条目</summary>
+        static void ApplyArchive(WallpaperItem it, string root, Dictionary<string, object> rec)
+        {
+            try
+            {
+                string title = Json.Str(rec, "title");
+                if (title.Length > 0) it.Title = title;
+
+                string tag = Json.Str(rec, "tag");
+                if (tag.Length > 0) it.Tag = tag;
+
+                it.Fav = Json.Bool(rec, "fav", false);
+                it.Effect = (int)Json.Long(rec, "fx");
+                if (it.Effect != 2) it.Effect = 0;
+                it.Motion = Json.Bool(rec, "motion", false) && it.Effect == 2;
+
+                // 缩略图还在就用它（比原图小、加载快），不在了退回原图
+                string rel = Json.Str(rec, "thumb");
+                if (rel.Length > 0)
+                {
+                    string tp = ToAbs(root, rel);
+                    if (File.Exists(tp)) it.ThumbAbs = tp;
+                }
+
+                // 动效要真有片子可播，否则又是「标着动态桌面却不动」
+                if (it.Motion && !RelatedVideo.CanPlay(root, it, it.ImagePath))
+                {
+                    it.Motion = false;
+                    it.Effect = 0;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 删除前把这一条的元数据存一份：还原时靠它对上号。
+        /// 只留最近 200 条，存档文件不会无限长。
+        /// </summary>
+        static void ArchiveEntry(string root, WallpaperItem it)
+        {
+            if (it == null || string.IsNullOrEmpty(it.Id)) return;
+            try
+            {
+                string file = TrashArchivePath(root);
+                List<object> all = new List<object>();
+                if (File.Exists(file))
+                {
+                    try
+                    {
+                        object[] arr = Json.AsArr(Json.Parse(File.ReadAllText(file, Encoding.UTF8)));
+                        if (arr != null)
+                        {
+                            foreach (object o in arr)
+                            {
+                                Dictionary<string, object> d = Json.AsDict(o);
+                                if (d != null && Json.Str(d, "id") == it.Id) continue;   // 同 id 用新的替换
+                                all.Add(o);
+                            }
+                        }
+                    }
+                    catch { all.Clear(); }
+                }
+
+                Dictionary<string, object> rec = new Dictionary<string, object>();
+                rec["id"] = it.Id;
+                rec["title"] = it.Title;
+                rec["tag"] = it.Tag;
+                rec["file"] = it.File;
+                rec["thumb"] = it.Thumb;
+                rec["bytes"] = it.Bytes;
+                rec["fav"] = it.Fav;
+                rec["motion"] = it.Motion;
+                rec["fx"] = it.Effect;
+                rec["deleted"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                all.Add(rec);
+
+                while (all.Count > 200) all.RemoveAt(0);
+
+                Directory.CreateDirectory(Path.Combine(root, ".trash"));
+                File.WriteAllText(file, Json.Serialize(all), new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         static string ToAbs(string root, string rel)
@@ -217,7 +339,12 @@ namespace WallpaperManager
                 }
             }
 
-            // 2) 删文件：主文件、缩略图、封面
+            // 2) 先把这一条的标题 / 收藏 / 动效存档到 .trash\entries.json。
+            //    从回收站还原回来的文件只有内容、索引里没有它，Load 收编时靠这份存档把标题捡回来，
+            //    否则卡片显示成一串 biliart-xxxx，看着就像「根本没还原」。
+            ArchiveEntry(root, item);
+
+            // 3) 删文件：主文件、缩略图、封面
             //    同一次删除共用一个 .trash\<时间戳> 目录，留给「没能进回收站」的文件当救命副本
             string stampDir = Path.Combine(Path.Combine(root, ".trash"),
                 DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Environment.TickCount);
