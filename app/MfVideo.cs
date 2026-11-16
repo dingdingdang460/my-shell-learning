@@ -232,6 +232,23 @@ namespace WallpaperManager
 
         public sealed class Reader : IDisposable
         {
+            // 11-16 晚：记住上一次成功的打开方式，下次先试它。
+            //
+            // 背景：PlayerVideo 播完一轮是「关掉解码器再打开」（SetCurrentPosition 实测会让
+            // 进程静默消失，见 DecodeLoop 注释）。而 H.264 解码器原生只吐 NV12，
+            // 每轮都从 RGB32 开始试就必然先失败一次 0xc00d36b4 ——
+            // 日志每 4.5 秒刷一条「设定输出格式失败」，还白花几十毫秒在注定失败的协商上。
+            // 现在有了这个记忆，第二轮起一次谈成；真遇到文件换了编码，仍然会回退到完整扫描。
+            static int lastGoodCombo = -1;
+
+            /// <summary>上一次 Open 试了几种配置（自检用来钉住「第二轮只试 1 次」）</summary>
+            public static int LastAttempts;
+            /// <summary>上一次 Open 采用的配置名，失败时为空串</summary>
+            public static string LastGoodName = "";
+
+            /// <summary>忘掉记住的配置（换片子/换设备后想重新全扫描时用）</summary>
+            public static void ForgetCombo() { lastGoodCombo = -1; }
+
             IMFSourceReader reader;
             public int Width;
             public int Height;
@@ -268,9 +285,14 @@ namespace WallpaperManager
                     new Combo("file:/// · 带视频处理属性 · RGB32", fileUrl, true, MFVideoFormat_RGB32)
                 };
 
-                for (int i = 0; i < combos.Length; i++)
+                for (int k = 0; k < combos.Length; k++)
                 {
+                    // 先试上次成功那档，再按原顺序扫其余配置（上次那档本身不重复试）
+                    int i = k;
+                    if (lastGoodCombo >= 0 && k == 0) i = lastGoodCombo;
+                    else if (lastGoodCombo >= 0 && k <= lastGoodCombo) i = k - 1;
                     Combo c = combos[i];
+                    LastAttempts = k + 1;
 
                     IMFAttributes attrs = null;
                     if (c.Processing)
@@ -357,6 +379,8 @@ namespace WallpaperManager
                     if (!Quiet) Log.Note("[MF] ✔ 采用「" + c.Name + "」 " + r.Width + "x" + r.Height
                              + " stride=" + r.Stride
                              + (r.IsNv12 ? "（解码器只给 NV12，本进程转 RGB）" : "（RGB32 直通）"));
+                    lastGoodCombo = i;          // 下次先试这一档
+                    LastGoodName = c.Name;
                     return r;
                 }
 

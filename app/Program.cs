@@ -194,6 +194,11 @@ namespace WallpaperManager
 
         public void Initialize()
         {
+            // 自检进程一律不进回收站：主人 11-16 一天里被自检攒了 484 条回收站记录，
+            // 手动清了一次。自检造的临时文件没有还原价值，直接硬删。
+            // guardtest 要验「真进了回收站」时会临时关掉，跑完自己清记录（见 Recycle.TestNoRecycle）。
+            Recycle.TestNoRecycle = SelfTestArgs();
+
             ResourcesDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "resources");
             Greeting.Load(ResourcesDir);
 
@@ -741,6 +746,28 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --relatedvideotest：\r\n" + detail);
                         Log.Note("自检 --relatedvideotest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--uhdtest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-16：4K 升级链。全程注入假下载 + 假分辨率探测，
+                    // 一次网络都不出，也不碰真实壁纸库。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.UhdTest(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --uhdtest：\r\n" + detail);
+                        Log.Note("自检 --uhdtest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -2306,6 +2333,19 @@ namespace WallpaperManager
             if (it == null) return false;
             if (it.IsVideo) return true;
             return it.Motion && VideoFor(it) != null;
+        }
+
+        /// <summary>
+        /// 这条到底有没有片子（只读探测，不复制不改名）。
+        /// 删除流程会连片子一起送回收站，确认框得按这个说实话，
+        /// 不能只看 Motion 标记 —— 有片但没标动效的条目一样会带走视频。
+        /// </summary>
+        public bool HasRelatedVideo(WallpaperItem it)
+        {
+            if (it == null) return false;
+            if (it.IsVideo) return true;
+            string img = !string.IsNullOrEmpty(it.ImagePath) ? it.ImagePath : "";
+            return RelatedVideo.LocateReadOnly(Config.LibRoot, it, img).Length > 0;
         }
 
         /// <summary>按条目类型拉起播放器：真视频，或静态图配好的云端飘动视频。
@@ -4251,6 +4291,7 @@ namespace WallpaperManager
             sb.Append(" / 没删掉 ").Append(rpt.Failed);
             sb.Append(" / 去向未确认 ").Append(rpt.Unverified);
             if (rpt.Stashed > 0) sb.Append(" / 缩略图暂存 ").Append(rpt.Stashed);
+            if (rpt.Videos > 0) sb.Append(" / 连视频 ").Append(rpt.Videos);
             if (rpt.TrashDir.Length > 0) sb.Append(" / 副本 ").Append(rpt.TrashDir);
             return sb.ToString();
         }
@@ -4274,7 +4315,12 @@ namespace WallpaperManager
             if (rpt.Failed > 0)
                 return head + "（" + rpt.Failed + " 个文件没删掉，可能被播放器占用）";
             if (rpt.Recycled > 0)
-                return head + "（已移入回收站，可在回收站里还原）";
+            {
+                // 连片子一起删的时候要说清楚，否则主人会以为又留了个孤儿在 videos 里
+                string what = rpt.Videos > 0 ? "图 + 动效视频都已移入回收站，可一起还原"
+                                             : "已移入回收站，可在回收站里还原";
+                return head + "（" + what + "）";
+            }
             return head + "（磁盘上已经没有对应文件）";
         }
 
@@ -4541,8 +4587,68 @@ namespace WallpaperManager
             });
         }
 
-        void DoSet(WallpaperItem it, string path)
+        /// <summary>
+        /// 右键「升级为 4K」：把现在的 1080P 片换成 3840x2160，旧片改名 .bak-4k 保留。
+        /// 播放中的必须先停 —— 播放器占着 mp4，Windows 不允许改名。
+        /// </summary>
+        public void Upgrade4k(WallpaperItem it)
         {
+            if (it == null) return;
+            if (!it.IsVideo)
+            {
+                if (win != null) win.SetStatus("只有视频能升 4K；静态图请用「下载 4K 封面」");
+                return;
+            }
+            if (string.IsNullOrEmpty(it.Upgrade4k))
+            {
+                if (win != null) win.SetStatus("这条没有 4K 源（只有站点视频才有 3840x2160 版本）");
+                return;
+            }
+
+            // 4K 片体积约 1080P 的 4 倍，不能一声不响下一大坨
+            MessageBoxResult r = MessageBox.Show(
+                "把「" + it.Title + "」换成 4K（3840x2160）版本？\r\n\r\n" +
+                "· 会重新下载一次，体积约 4 倍；\r\n" +
+                "· 现在的片子改名为 .bak-4k 保留，想退回去随时可以；\r\n" +
+                "· 4K 解码更吃显卡，1080P 的屏幕上看不出差别。",
+                "升级为 4K", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel);
+            if (r != MessageBoxResult.OK) return;
+
+            bool wasPlaying = IsPlayingNow() && Config.LastDynamicId == it.Id;
+            if (wasPlaying)
+            {
+                StopPlayback();
+                MarkStopped();
+            }
+
+            WallpaperItem captured = it;
+            if (win != null) win.SetStatus("正在下载 4K 版本：" + it.Title + " …");
+            Task.Run(delegate
+            {
+                string err = Online.Upgrade(captured, Config.LibRoot, delegate(string msg)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate { if (win != null) win.SetStatus(msg); }));
+                });
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (err.Length > 0)
+                    {
+                        Log.Note("4K 升级未完成：" + captured.Id + " · " + err);
+                        if (win != null) win.SetStatus(err);
+                        if (wasPlaying) ApplyItem(captured);   // 停过的要开回去，别把桌面留在暂停
+                        return;
+                    }
+                    if (win != null)
+                    {
+                        win.RefreshList();
+                        win.SetStatus("已换成 4K：" + captured.Title + "（" + captured.Resolution + "）");
+                    }
+                    if (wasPlaying) ApplyItem(captured);
+                }));
+            });
+        }
+
+        void DoSet(WallpaperItem it, string path)        {
             // 竖屏图 / 超宽图不能无脑用「填充」：填充按屏幕比例裁切，
             // 9:16 的图会被放大 3~4 倍只剩中间一条。这里先让 WallpaperFit
             // 算出一条合适的路 —— 比例刚好就用原图，不一样就合成一张

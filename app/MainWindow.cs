@@ -1755,7 +1755,7 @@ namespace WallpaperManager
                     WallpaperItem it = Online.Install(captured, app.Config.LibRoot, tag, delegate(string msg)
                     {
                         Dispatcher.BeginInvoke(new Action(delegate { SetStatus(msg); }));
-                    });
+                    }, app.Config.Prefer4k);
 
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
@@ -3152,6 +3152,16 @@ namespace WallpaperManager
             m2.Header = "下载 4K 封面";
             m2.Click += delegate { app.FetchCover(it); };
 
+            // 只有站点视频才存了 4K 源（upgrade_4k）。没有就不放这一项，
+            // 免得点了只回一句「这条没有 4K 源」—— 菜单里不该出现做不到的按钮。
+            if (it.IsVideo && !string.IsNullOrEmpty(it.Upgrade4k))
+            {
+                MenuItem m4k = new MenuItem();
+                m4k.Header = "升级为 4K（下载 3840x2160）";
+                m4k.Click += delegate { app.Upgrade4k(it); };
+                cm.Items.Add(m4k);
+            }
+
             MenuItem m3 = new MenuItem();
             m3.Header = "打开所在文件夹";
             m3.Click += delegate { OpenFolder(it); };
@@ -3182,7 +3192,13 @@ namespace WallpaperManager
         void ConfirmDelete(WallpaperItem it)
         {
             if (it == null) return;
-            string extra = it.IsVideo ? "\r\n\r\n这是动态壁纸视频，视频文件也会一起删除。" : "";
+            // 11-16 晚：删除现在会连片子一起送回收站，确认框必须提前讲清楚 ——
+            // 主人以为只删一张图、结果视频也没了，那是惊吓不是功能。
+            string extra;
+            if (it.IsVideo) extra = "\r\n\r\n这是动态壁纸视频，视频文件也会一起删除。";
+            else if (app.HasRelatedVideo(it))
+                extra = "\r\n\r\n这张有动效视频，图片和视频会一起移入回收站。";
+            else extra = "";
             MessageBoxResult r = MessageBox.Show(
                 "从壁纸库删除「" + DisplayTitle(it.Title) + "」？" + extra +
                 "\r\n\r\n磁盘文件会移入回收站，之后可以在回收站里还原。" +

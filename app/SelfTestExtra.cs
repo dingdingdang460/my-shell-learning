@@ -1099,6 +1099,34 @@ namespace WallpaperManager
                 sb.Append("  ").Append(stills[i].Id).Append("  HasCloudVideo=")
                   .Append(app.HasCloudVideo(stills[i])).Append("\r\n");
 
+            // ---- 解码器打开方式记忆：第二轮不许再撞 0xc00d36b4 ----
+            // PlayerVideo 每播完一轮都要重开解码器（绕开 SetCurrentPosition 的静默崩溃），
+            // 以前每轮都从 RGB32 起步 —— H.264 解码器只吐 NV12，于是必然先失败一次，
+            // 日志每 4.5 秒一条「设定输出格式失败 0xc00d36b4」，还白花几十毫秒。
+            // 现在记住上次成功的配置，第二轮必须一次谈成。
+            int tries2 = -1;
+            bool reopenOk = false;
+            string reopenName = "";
+            for (int i = 0; i < stills.Count && !reopenOk; i++)
+            {
+                string own = CloudGen.VideoPath(root, stills[i].Id);
+                if (!File.Exists(own)) continue;
+                bool savedQuiet = MfVideo.Quiet;
+                MfVideo.Quiet = true;
+                try
+                {
+                    MfVideo.Reader.Open(own).Dispose();
+                    MfVideo.Reader.Open(own).Dispose();
+                    tries2 = MfVideo.Reader.LastAttempts;
+                    reopenName = MfVideo.Reader.LastGoodName;
+                    reopenOk = tries2 == 1;
+                }
+                catch { }
+                finally { MfVideo.Quiet = savedQuiet; }
+            }
+            Hit(sb, ref pass, ref total, "同一视频第二次打开只试 1 种格式（不再每轮撞 0xc00d36b4）",
+                reopenOk, tries2 < 0 ? "没找到可测视频" : "试了 " + tries2 + " 次 · " + reopenName);
+
             return Finish(sb, pass, total);
         }
 
@@ -2105,6 +2133,11 @@ namespace WallpaperManager
             string f1 = Path.Combine(dir, "recycle-me.txt");
             string sub = Path.Combine(dir, "sub");
             string f2 = Path.Combine(sub, "nested.txt");
+            // 自检进程默认不进回收站（Recycle.TestNoRecycle，免得给主人攒一堆垃圾记录）。
+            // 这一段就是要**验**「真的进了回收站」，所以临时打开真实回收，
+            // 断言跑完再按原路径把自己造的那几条记录清掉。
+            bool savedNoRecycle = Recycle.TestNoRecycle;
+            Recycle.TestNoRecycle = false;
             bool recOk = false;
             bool dirOk = false;
             bool notFoundOk = false;
@@ -2143,14 +2176,19 @@ namespace WallpaperManager
             bool tallyOk = false;
             bool adoptTitleOk = false;
             bool stashOk = false;
+            bool videoGoneOk = false;
             bool adoptThumbOk = false;
             string libTmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-lib-" + Environment.TickCount);
             try
             {
                 Directory.CreateDirectory(Path.Combine(libTmp, "images"));
                 Directory.CreateDirectory(Path.Combine(libTmp, "thumbs"));
+                Directory.CreateDirectory(Path.Combine(libTmp, "videos"));
                 File.WriteAllText(Path.Combine(libTmp, "images", "zz-guard-1.jpg"), "x", new UTF8Encoding(false));
                 File.WriteAllText(Path.Combine(libTmp, "thumbs", "zz-guard-1.jpg"), "x", new UTF8Encoding(false));
+                // 造一段「这条壁纸的片子」：删图时必须连它一起走，
+                // 否则 videos 里留个没有任何条目指向的孤儿，白占磁盘还得主人自己翻。
+                File.WriteAllText(Path.Combine(libTmp, "videos", "zz-guard-1.mp4"), "v", new UTF8Encoding(false));
                 File.WriteAllText(Path.Combine(libTmp, "index.json"),
                     "[{\"id\":\"zz-guard-1\",\"title\":\"guard\",\"file\":\"images/zz-guard-1.jpg\"}]",
                     new UTF8Encoding(false));
@@ -2169,13 +2207,17 @@ namespace WallpaperManager
                 // 缩略图各送一次回收站。缩略图是派生文件，现在挪进 .trash\covers 暂存，
                 // 回收站里只留原图那一条。这条断言就钉住「一张图 = 一条记录」。
                 string stashPath = Path.Combine(libTmp, ".trash", "covers", "zz-guard-1.jpg");
-                tallyOk = ok && dr.Recycled == 1 && dr.Stashed == 1
+                // 现在一条静态图删除 = 原图 + 片子两条回收站记录（都是真实内容，都该能还原）
+                tallyOk = ok && dr.Recycled == 2 && dr.Stashed == 1 && dr.Videos == 1
                           && dr.Vanished == 0 && dr.Failed == 0
                           && !File.Exists(Path.Combine(libTmp, "images", "zz-guard-1.jpg"));
+                // 11-16 晚：删图必须连片子一起删，否则 videos 里永久留一个孤儿
+                videoGoneOk = !File.Exists(Path.Combine(libTmp, "videos", "zz-guard-1.mp4"));
                 stashOk = File.Exists(stashPath)
                           && !File.Exists(Path.Combine(libTmp, "thumbs", "zz-guard-1.jpg"));
                 sb.Append("  （删除记账：进回收站=").Append(dr.Recycled)
                   .Append(" 缩略图暂存=").Append(dr.Stashed)
+                  .Append(" 连视频=").Append(dr.Videos)
                   .Append(" 永久=").Append(dr.Vanished)
                   .Append(" 失败=").Append(dr.Failed)
                   .Append(" 未确认=").Append(dr.Unverified).Append("）\r\n");
@@ -2206,10 +2248,23 @@ namespace WallpaperManager
             {
                 try { if (Directory.Exists(libTmp)) Directory.Delete(libTmp, true); } catch { }
             }
-            Hit(sb, ref pass, ref total, "删除回报账目：一张图只留一条回收站记录（原图），缩略图不计入", tallyOk, "");
+            Hit(sb, ref pass, ref total, "删除回报账目：原图 + 片子各一条记录，缩略图不计入", tallyOk, "");
+            Hit(sb, ref pass, ref total, "删图时连它的动效视频一起删（videos 里不留孤儿）", videoGoneOk, "");
             Hit(sb, ref pass, ref total, "缩略图不进回收站：挪进 .trash\\covers 暂存", stashOk, "");
             Hit(sb, ref pass, ref total, "还原后刷库收编：标题从删除存档里捡回来，不是一串 id", adoptTitleOk, "");
             Hit(sb, ref pass, ref total, "还原后缩略图接上暂存那份，不退回用整张大图", adoptThumbOk, "");
+
+            // 收尾：自检为了让断言验到「真进了回收站」不得不真删了几个文件，
+            // 但那些临时文件不该留在主人的回收站里。按原路径把记录和实体一起清掉。
+            int purged = 0;
+            purged += Recycle.PurgeRecordsFor(f1);
+            purged += Recycle.PurgeRecordsFor(sub);
+            purged += Recycle.PurgeRecordsFor(Path.Combine(libTmp, "images", "zz-guard-1.jpg"));
+            purged += Recycle.PurgeRecordsFor(Path.Combine(libTmp, "videos", "zz-guard-1.mp4"));
+            Recycle.TestNoRecycle = savedNoRecycle;
+            sb.Append("  （回收站收尾：清掉自检记录 ").Append(purged).Append(" 条）\r\n");
+            Hit(sb, ref pass, ref total, "自检跑完把自己造的回收站记录清干净", purged >= 4,
+                "清了 " + purged + " 条");
 
             // 11-16 晚：从回收站还原回来的图，刷新库必须能看见。
             // 还原只把文件放回 images\，索引里没有它 —— 全靠 Load 的「散图收编」这一段。
@@ -2598,6 +2653,144 @@ namespace WallpaperManager
                 if (!p.WaitForExit(120000)) { try { p.Kill(); } catch { } }
             }
             catch { }
+        }
+
+        /// <summary>
+        /// 11-16：4K 升级链自检。全隔离 —— 临时库 + 注入的假下载 / 假分辨率探测，
+        /// 一次网络请求都不发，也不碰 D:\Wallpaper。
+        /// 要钉住的是最要命那条：**站点给了假 4K（还是 1080P）时绝不能把好片换掉**。
+        /// </summary>
+        public static string UhdTest(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+
+            string tmp = Path.Combine(Path.GetTempPath(), "wb-uhd-" + Environment.TickCount);
+            Func<string, string, bool> savedFetch = Online.SelfTestFetch;
+            Func<string, int[]> savedProbe = Online.SelfTestProbe;
+            try
+            {
+                string vdir = Path.Combine(tmp, "videos");
+                Directory.CreateDirectory(vdir);
+                string vid = Path.Combine(vdir, "uhd-1.mp4");
+                string idx = Path.Combine(tmp, "index.json");
+
+                // ---- 1) 入库选源（纯函数）----
+                OnlineItem with4k = new OnlineItem();
+                with4k.Slug = "uhd-1";
+                with4k.Title = "4K 样例";
+                with4k.Mp4Hd = "http://example.invalid/hd.mp4";
+                with4k.Mp4Uhd = "http://example.invalid/uhd.mp4";
+
+                OnlineItem no4k = new OnlineItem();
+                no4k.Slug = "uhd-2";
+                no4k.Title = "没有 4K 源";
+                no4k.Mp4Hd = "http://example.invalid/hd2.mp4";
+
+                bool pickOk = Online.PickVideoUrl(with4k, false) == with4k.Mp4Hd
+                           && Online.PickVideoUrl(with4k, true) == with4k.Mp4Uhd
+                           && Online.PickVideoUrl(no4k, true) == no4k.Mp4Hd
+                           && Online.PickVideoUrl(null, true).Length == 0;
+                Hit(sb, ref pass, ref total, "入库选源：开了 4K 且源支持才下 4K，否则老实下 1080P", pickOk,
+                    "默认→" + Online.PickVideoUrl(with4k, false) + " / 开→" + Online.PickVideoUrl(with4k, true));
+
+                // ---- 造一条「已有 1080P 片 + 有 4K 源」的条目 ----
+                WallpaperItem it = new WallpaperItem();
+                it.Id = "uhd-1";
+                it.Title = "4K 样例";
+                it.File = "videos/uhd-1.mp4";
+                it.IsVideo = true;
+                it.Upgrade4k = with4k.Mp4Uhd;
+
+                Action resetOld = delegate
+                {
+                    File.WriteAllBytes(vid, new byte[200000]);      // 假装是 200KB 的 1080P 片
+                    File.WriteAllText(idx, "[{\"id\":\"uhd-1\",\"title\":\"4K 样例\","
+                        + "\"file\":\"videos/uhd-1.mp4\",\"bytes\":200000,\"resolution\":\"1920x1080\","
+                        + "\"upgrade_4k\":\"" + with4k.Mp4Uhd + "\"}]", new UTF8Encoding(false));
+                };
+                resetOld();
+
+                // 假下载：写出 300KB 的「4K 片」，绝不出网
+                bool fetchFail = false;
+                Online.SelfTestFetch = delegate(string url, string target)
+                {
+                    if (fetchFail) return false;
+                    File.WriteAllBytes(target, new byte[300000]);
+                    return true;
+                };
+
+                // ---- 2) 没有 4K 源时明确拒绝 ----
+                WallpaperItem noSrc = new WallpaperItem();
+                noSrc.Id = "uhd-2";
+                noSrc.File = "videos/uhd-2.mp4";
+                noSrc.IsVideo = true;
+                string whyNoSrc = Online.Upgrade(noSrc, tmp, null);
+                Hit(sb, ref pass, ref total, "没有 4K 源的条目：拒绝升级并说明原因",
+                    whyNoSrc.Length > 0 && whyNoSrc.IndexOf("4K 源") >= 0, whyNoSrc);
+
+                // ---- 3) 正常升级：真 4K 才换片，旧片留 .bak-4k ----
+                Online.SelfTestProbe = delegate(string p) { return new int[] { 3840, 2160 }; };
+                string upOk = Online.Upgrade(it, tmp, null);
+                string bak1 = vid + ".bak-4k";
+                bool swapped = upOk.Length == 0
+                               && File.Exists(vid) && new FileInfo(vid).Length == 300000
+                               && File.Exists(bak1) && new FileInfo(bak1).Length == 200000
+                               && it.Resolution == "3840x2160";
+                // index.json 必须跟着改，否则重启后界面还写 1920x1080
+                bool idxOk = false;
+                try
+                {
+                    object[] arr = Json.AsArr(Json.Parse(File.ReadAllText(idx, Encoding.UTF8)));
+                    Dictionary<string, object> d = (arr != null && arr.Length > 0) ? Json.AsDict(arr[0]) : null;
+                    idxOk = d != null && Json.Str(d, "resolution") == "3840x2160"
+                            && Json.Long(d, "bytes") == 300000;
+                }
+                catch { }
+                Hit(sb, ref pass, ref total, "真 4K：换上新片、旧片留 .bak-4k、分辨率记账", swapped, upOk);
+                Hit(sb, ref pass, ref total, "升级后 index.json 的分辨率 / 大小同步更新", idxOk, "");
+
+                // ---- 4) 站点给假 4K（还是 1080P）：必须拒绝替换 ----
+                resetOld();
+                Online.SelfTestProbe = delegate(string p) { return new int[] { 1920, 1080 }; };
+                string whyFake = Online.Upgrade(it, tmp, null);
+                bool kept = whyFake.Length > 0
+                            && File.Exists(vid) && new FileInfo(vid).Length == 200000
+                            && !File.Exists(vid + ".part4k");
+                Hit(sb, ref pass, ref total, "假 4K（实测 1920x1080）：拒绝替换，原片一个字节不动",
+                    kept, whyFake);
+
+                // ---- 5) 下载失败：原片不动、不留 .part4k ----
+                resetOld();
+                Online.SelfTestProbe = delegate(string p) { return new int[] { 3840, 2160 }; };
+                fetchFail = true;
+                string whyNet = Online.Upgrade(it, tmp, null);
+                fetchFail = false;
+                bool netKept = whyNet.Length > 0 && File.Exists(vid)
+                               && new FileInfo(vid).Length == 200000
+                               && !File.Exists(vid + ".part4k");
+                Hit(sb, ref pass, ref total, "下载失败：原片保持不动、不留半截临时文件", netKept, whyNet);
+
+                // ---- 6) 第二次升级：旧备份不能被覆盖 ----
+                resetOld();
+                string up2 = Online.Upgrade(it, tmp, null);
+                bool bak2 = File.Exists(vid + ".bak-4k") && File.Exists(vid + ".bak-4k2")
+                            && new FileInfo(vid + ".bak-4k").Length == 200000;
+                Hit(sb, ref pass, ref total, "重复升级：备份加序号，原来那份不被覆盖", up2.Length == 0 && bak2, "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "自检过程无异常", false,
+                    ex.GetType().Name + "：" + ex.Message);
+            }
+            finally
+            {
+                Online.SelfTestFetch = savedFetch;
+                Online.SelfTestProbe = savedProbe;
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            return Finish(sb, pass, total);
         }
 
         static WallpaperItem ItemById(List<WallpaperItem> list, string id)

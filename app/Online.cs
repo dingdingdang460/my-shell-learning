@@ -190,7 +190,8 @@ namespace WallpaperManager
         /// 下载并登记为本地壁纸：视频进 videos/，4K 封面进 images/，缩略图进 thumbs/，最后追加 index.json。
         /// 已存在同 id 的视频则跳过下载（幂等）。progress 回调在后台线程上调用。
         /// </summary>
-        public static WallpaperItem Install(OnlineItem o, string root, string tag, Action<string> progress)
+        public static WallpaperItem Install(OnlineItem o, string root, string tag, Action<string> progress,
+                                            bool prefer4k = false)
         {
             if (o == null) throw new ArgumentNullException("o");
             if (string.IsNullOrEmpty(root)) throw new Exception("壁纸库路径为空");
@@ -206,10 +207,14 @@ namespace WallpaperManager
             string coverAbs = Path.Combine(dirImages, o.Slug + ".jpg");
             string thumbAbs = Path.Combine(dirThumbs, o.Slug + ".jpg");
 
+            bool downloaded4k = false;
             if (!File.Exists(videoAbs) || new FileInfo(videoAbs).Length < 100000)
             {
-                if (progress != null) progress("正在下载视频：" + o.Title);
-                DownloadTo(o.Mp4Hd, videoAbs, 100000);
+                string url = PickVideoUrl(o, prefer4k);
+                bool is4k = prefer4k && !string.IsNullOrEmpty(o.Mp4Uhd) && url == o.Mp4Uhd;
+                if (progress != null) progress("正在下载视频" + (is4k ? "（4K 3840x2160）" : "（1080P）") + "：" + o.Title);
+                Fetch(url, videoAbs, 100000);
+                downloaded4k = is4k;
             }
 
             if (!File.Exists(coverAbs) || new FileInfo(coverAbs).Length < 20000)
@@ -240,9 +245,175 @@ namespace WallpaperManager
             it.IsVideo = true;
             it.ThumbAbs = File.Exists(thumbAbs) ? thumbAbs : (File.Exists(coverAbs) ? coverAbs : "");
             it.ImagePath = File.Exists(coverAbs) ? coverAbs : null;
+            it.Resolution = downloaded4k ? "3840x2160" : "1920x1080";
 
-            AppendIndex(root, it);
+            AppendIndex(root, it, it.Resolution);
             return it;
+        }
+
+        /// <summary>
+        /// 入库时该下哪个版本：开了「优先 4K」且源真有 3840x2160 才下 4K，
+        /// 否则老实下 1080P（4K 的体积和解码压力都是 4 倍，1080P 屏上看不出差别）。
+        /// </summary>
+        public static string PickVideoUrl(OnlineItem o, bool prefer4k)
+        {
+            if (o == null) return "";
+            if (prefer4k && !string.IsNullOrEmpty(o.Mp4Uhd)) return o.Mp4Uhd;
+            return o.Mp4Hd;
+        }
+
+        /// <summary>
+        /// 自检注入：替掉真实下载（url, 目标路径）→ 是否成功。
+        /// 设了就绝不出网，只用本地文件模拟「下载完成」。
+        /// </summary>
+        public static Func<string, string, bool> SelfTestFetch;
+
+        /// <summary>
+        /// 自检注入：替掉「抽真实分辨率」的探测（路径）→ 返回 {宽, 高}，失败返回 null。
+        /// </summary>
+        public static Func<string, int[]> SelfTestProbe;
+
+        /// <summary>下载：自检模式走注入，正常运行走真实网络</summary>
+        static void Fetch(string url, string target, long minBytes)
+        {
+            if (SelfTestFetch != null)
+            {
+                if (!SelfTestFetch(url, target)) throw new Exception("（自检注入）下载失败：" + url);
+                return;
+            }
+            DownloadTo(url, target, minBytes);
+        }
+
+        /// <summary>
+        /// 探测视频真实分辨率。用 MF 打开读 Width/Height —— 不信文件名里的尺寸，
+        /// 也不靠「文件变大了就是 4K」猜：站点可能给 404 页面或还是 1080P 的片子。
+        /// 打不开返回 null。
+        /// </summary>
+        static int[] ProbeSize(string path)
+        {
+            if (SelfTestProbe != null) return SelfTestProbe(path);
+            try
+            {
+                using (MfVideo.Reader r = MfVideo.Reader.Open(path))
+                {
+                    return new int[] { r.Width, r.Height };
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 把一个 1080P 条目升级成 4K（3840x2160）。成功返回空串，失败返回给主人看的原因。
+        ///
+        /// 规矩：
+        ///   · 只有站点视频才有 4K 源（upgrade_4k），B 站图集/本地自出片一律拒绝并说明原因；
+        ///   · 先下到 .part4k，用 MF 抽真实分辨率，**确认宽度 ≥ 3000 才替换**，
+        ///     否则删掉临时文件、原片一个字节都不动（宁可升级失败，也不能把好片换成 1080P）；
+        ///   · 旧片改名 .bak-4k 保留（4K 解码更吃显卡，主人想退回去还有原件），已有就加序号，绝不覆盖。
+        /// </summary>
+        public static string Upgrade(WallpaperItem it, string root, Action<string> progress)
+        {
+            if (it == null) return "条目为空";
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return "壁纸库目录不存在";
+            if (!it.IsVideo) return "只有视频条目能升 4K（静态图的「下载 4K 封面」是另一个入口）";
+            if (string.IsNullOrEmpty(it.Upgrade4k)) return "这条没有 4K 源（只有站点视频才有 3840x2160 版本）";
+
+            string rel = it.File.Length > 0 ? it.File : "videos/" + it.Id + ".mp4";
+            string target = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
+            string part = target + ".part4k";
+
+            try
+            {
+                if (progress != null) progress("正在下载 4K 版本：" + it.Title);
+                Fetch(it.Upgrade4k, part, 100000);
+
+                long newLen = new FileInfo(part).Length;
+                if (newLen < 100000)
+                {
+                    Drop(part);
+                    return "下载内容过小（" + newLen + " 字节），可能不是有效视频，已放弃替换";
+                }
+
+                int[] sz = ProbeSize(part);
+                if (sz == null || sz[0] <= 0 || sz[1] <= 0)
+                {
+                    Drop(part);
+                    return "下载到的文件读不出分辨率（可能不是有效 mp4），已放弃替换";
+                }
+                if (sz[0] < 3000)
+                {
+                    Drop(part);
+                    return "下载到的不是 4K（实测 " + sz[0] + "x" + sz[1] + "），已放弃替换，原片未动";
+                }
+
+                // 换片：旧片进 .bak-4k（不覆盖已有备份），新片就位
+                string bak = target + ".bak-4k";
+                if (File.Exists(bak))
+                {
+                    int n = 2;
+                    while (File.Exists(bak + n)) n++;
+                    bak = bak + n;
+                }
+                bool hadOld = File.Exists(target);
+                if (hadOld) File.Move(target, bak);
+                try
+                {
+                    File.Move(part, target);
+                }
+                catch
+                {
+                    // 新片没就位就把旧片放回去，别留下「删了旧的、没换成新的」
+                    try { if (hadOld && !File.Exists(target)) File.Move(bak, target); } catch { }
+                    throw;
+                }
+
+                it.Bytes = new FileInfo(target).Length;
+                it.Duration = Mp4DurationSeconds(target);
+                it.Resolution = sz[0] + "x" + sz[1];
+                UpdateIndexEntry(root, it, it.Resolution);
+                Log.Note("4K 升级成功：" + it.Id + " → " + it.Resolution + "，" + it.Bytes + " 字节"
+                         + (hadOld ? "（旧片备份 " + Path.GetFileName(bak) + "）" : ""));
+                return "";
+            }
+            catch (Exception ex)
+            {
+                Drop(part);
+                return "4K 升级失败：" + ex.Message;
+            }
+        }
+
+        static void Drop(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+
+        /// <summary>把某条的分辨率 / 大小 / 时长写回 index.json（升级 4K 之后调）</summary>
+        public static bool UpdateIndexEntry(string root, WallpaperItem it, string resolution)
+        {
+            string path = Path.Combine(root, "index.json");
+            if (!File.Exists(path)) return false;
+            try
+            {
+                object[] arr = Json.AsArr(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
+                if (arr == null) return false;
+
+                bool hit = false;
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    Dictionary<string, object> d = Json.AsDict(arr[i]);
+                    if (d == null || Json.Str(d, "id") != it.Id) continue;
+                    d["bytes"] = it.Bytes;
+                    d["duration_s"] = Math.Round(it.Duration, 1);
+                    d["resolution"] = resolution;
+                    hit = true;
+                }
+                if (!hit) return false;
+
+                File.Copy(path, path + ".bak", true);
+                File.WriteAllText(path, Json.Serialize(arr), new UTF8Encoding(false));
+                return true;
+            }
+            catch { return false; }
         }
 
         static void DownloadTo(string url, string target, long minBytes)

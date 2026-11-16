@@ -27,6 +27,13 @@ namespace WallpaperManager
         /// 没有单独还原的价值，进回收站只会把界面搞乱。
         /// </summary>
         public int Stashed;
+        /// <summary>
+        /// 一起删掉的动效视频个数（videos\ 下的片子）。
+        /// 11-16 晚加：以前删壁纸只删图片和缩略图，videos\&lt;id&gt;.mp4 留在磁盘上成了永久孤儿
+        /// —— 没有任何条目指向它，却白占几 MB 到几十 MB，主人还得自己去文件夹里翻。
+        /// 现在删除时连片子一起送回收站，图和片能一起还原。
+        /// </summary>
+        public int Videos;
         /// <summary>留了副本的目录；没留副本时为空串</summary>
         public string TrashDir = "";
 
@@ -66,6 +73,7 @@ namespace WallpaperManager
                             it.Bytes = Json.Long(d, "bytes");
                             it.Duration = Json.Dbl(d, "duration_s");
                             it.Upgrade4k = Json.Str(d, "upgrade_4k");
+                            it.Resolution = Json.Str(d, "resolution");
                             it.Motion = Json.Bool(d, "motion", false);
                             it.Fav = Json.Bool(d, "fav", false);
                             // 动效方式现在只有一档：2 = 云端飘动视频。
@@ -371,7 +379,25 @@ namespace WallpaperManager
             AddTarget(root, primary, derived, Path.Combine(root, "thumbs", item.Id + ".jpg"));
             AddTarget(root, primary, derived, Path.Combine(root, "images", item.Id + ".png"));
 
-            foreach (string p in primary) DeleteUnder(root, p, stampDir, rpt);
+            // 3.5) 动效视频也必须一起删。
+            // 图片删了、videos\<id>.mp4 还躺在磁盘上 → 没有任何条目指向它（永久孤儿），
+            // 主人得自己进文件夹翻出来删。这里把它并进「主内容」一起送回收站，
+            // 在回收站里图和片还能一起还原。
+            // 用 LocateReadOnly：Find 命中散片时会复制成规范名，删除流程不要这种副作用。
+            if (!item.IsVideo)
+            {
+                string vid = RelatedVideo.LocateReadOnly(root, item, ToAbs(root, item.File));
+                if (vid.Length > 0) AddTarget(root, primary, derived, vid);
+            }
+
+            foreach (string p in primary)
+            {
+                int before = rpt.Recycled + rpt.Vanished + rpt.Unverified;
+                DeleteUnder(root, p, stampDir, rpt);
+                // 真正处理掉（进回收站 / 永久删 / 去向未确认）的 videos\ 文件才算「删掉了片子」
+                if (IsVideoPath(root, p) && rpt.Recycled + rpt.Vanished + rpt.Unverified > before)
+                    rpt.Videos++;
+            }
 
             // 主文件一个都没删掉（库里只剩一张缩略图）时，缩略图就是唯一的内容，
             // 必须老老实实送回收站，不能为了「少一条记录」把它藏进 .trash。
@@ -385,6 +411,19 @@ namespace WallpaperManager
             // 4) 没留副本 → 撤掉空目录，不留垃圾
             TrimTrash(root, stampDir, rpt);
             return true;
+        }
+
+        /// <summary>这个路径是不是库里的 videos\ 之下（用来把「删掉的片子」单独记账）</summary>
+        static bool IsVideoPath(string root, string full)
+        {
+            if (string.IsNullOrEmpty(full)) return false;
+            try
+            {
+                string vd = Path.GetFullPath(Path.Combine(root, "videos"))
+                             .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                return Path.GetFullPath(full).StartsWith(vd, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
         }
 
         /// <summary>

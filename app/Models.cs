@@ -13,6 +13,8 @@ namespace WallpaperManager
         public long Bytes;
         public double Duration;
         public string Upgrade4k = "";
+        /// <summary>分辨率标签，例如 "1920x1080" / "3840x2160"（index.json 里的 resolution）</summary>
+        public string Resolution = "";
         public string ThumbAbs = "";    // 缩略图绝对路径
         public string ImagePath;        // 已就绪的静态图（4K 封面或库内图片），null 表示未下载
         public bool IsVideo;
@@ -81,5 +83,11 @@ namespace WallpaperManager
         // WorkBuddy 自带 Python 的 imageio-ffmpeg），便携环境或装了别的版本时可手填。
         public string FfmpegPath = "";
         public bool AutoDelogo = true;
+
+        // ---- 4K（11-16 晚开始做）----
+        // 入库时优先下 3840x2160 版本，而不是默认的 1920x1080。
+        // 代价是体积和解码压力约 4 倍，**只有 4K 屏才看得出差别**，
+        // 所以默认关；另有「升级为 4K」的右键入口可以逐张手动升。
+        public bool Prefer4k;
     }
 }

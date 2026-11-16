@@ -1994,3 +1994,96 @@ Windows 的回收站是**一个文件一条 `$I`/`$R` 记录**，没有「一次
   自检进程只验逻辑，不收货、不写 `videos\`、不改 `index.json`。
 - `--guardtest` 加一条看门断言：「自检进程不收货」。谁把这个闸门拆掉，它立刻失败。
 - 代价说明：自检期间真实工单不会被扫到，跑完自检重开程序即可正常收货（无数据损失）。
+
+## 二十六、11-16 晚：删图带走片子 / 解码器不再每轮试错 / 自检不进回收站 / 4K 起步（v0.9.11）
+
+主人这一轮提了六件事，逐条落账：
+
+### 1. 删图时连动效视频一起删（主人问「还是说视频我得单独到文件夹删？」）
+
+事实：以前 `LibraryStore.Delete` 只处理 `item.File / item.Thumb / images\<id>.jpg / thumbs\<id>.jpg`，
+`videos\<id>.mp4` 一个字不碰 —— 删掉图片后片子成了**永久孤儿**：
+没有任何条目指向它，却白占几 MB 到几十 MB，主人只能自己进文件夹翻。
+
+改法：
+- `RelatedVideo.LocateReadOnly(libRoot, it, imagePath)`：**只读**定位（不复制、不改名、不写库）。
+  不能用 `Find` —— 它命中散片时会把文件复制成规范名，删除流程不需要这种副作用。
+- `Delete` 把定位到的片子并进「主内容」一起送回收站；`DeleteReport.Videos` 单独记账。
+  判定用 `IsVideoPath`（路径在 `videos\` 下且真的处理掉了）才计数。
+- 确认框按事实说话：`App.HasRelatedVideo()` 只读探测，有片就写「图片和视频会一起移入回收站」；
+  状态栏在 `Recycled` 时写「图 + 动效视频都已移入回收站，可一起还原」。
+
+回收站记录数因此从 1 条变 2 条（原图 + 片子），这是**对的** —— 两份都是真实内容，
+要能各自还原。缩略图仍然不进回收站（v0.9.10 的规则不变）。
+
+### 2. 播放器不再每轮撞 0xc00d36b4（主人说的「重复试」）
+
+`PlayerVideo.DecodeLoop` 每播完一轮是「关掉解码器再打开」（为了绕开
+`SetCurrentPosition` 实测的静默崩溃）。而 `MfVideo.Reader.Open` 原来每轮都从
+**RGB32** 开始试 —— H.264 解码器原生只吐 NV12，于是每轮必然先失败一次，
+日志每 4.5 秒一条「设定输出格式失败 0xc00d36b4」，还白花几十毫秒。
+
+改法：`Reader.lastGoodCombo` 记住上次成功的组合，下次先试它，失败再回退完整扫描；
+新增 `LastAttempts` / `LastGoodName` 供自检观察，`ForgetCombo()` 供换设备时清空。
+
+### 3. 自检不再往回收站丢东西
+
+以前每次 `--guardtest` 约 8 条 `$I` 记录，一天积 484 条，主人得手工清。
+现在 `Recycle.TestNoRecycle`（自检进程在 `App.Initialize` 里置位）：
+自检造的文件一律**硬删**，不产生回收站记录。
+
+但 guardtest 必须**验证**「真进了回收站」，所以它临时把它关掉、真删一次，
+断言跑完后 `Recycle.PurgeRecordsFor(path)` 解析 `$I` 里的原路径、
+把对应 `$R` 实体和 `$I` 记录一起清掉（精确全路径匹配，不按时间猜）。
+
+### 4. 4K 起步（主人说「4k 功能也开始做吧」）
+
+先摸清家底：
+- 站点视频本来就有 `Mp4Uhd`（3840x2160），以前**存进 `upgrade_4k` 却从来没被用过**，
+  入库一律下 `Mp4Hd`（1920x1080）；
+- 「下载 4K 封面」是另一件事（静态图，`EnsureCover`），早就有了；
+- 本机屏幕实测 **1920x1080**（日志 `[1] 屏幕 1920x1080`）——
+  所以 4K 视频在本机**看不出差别**，体积和解码压力却是 4 倍。
+
+这一版做到的：
+- `AppConfig.Prefer4k`（默认关，设置里有开关）+ `Online.PickVideoUrl`：
+  开了且源真有 4K 才下 4K，否则老实 1080P；入库把真实 `resolution` 写进 index.json。
+- `Online.Upgrade(it, root, progress)` + 右键「升级为 4K（下载 3840x2160）」：
+  逐张手动升级，菜单只在该条目**真有 4K 源**时才出现。
+  规矩：先下 `.part4k` → 用 MF 抽真实分辨率 → **宽度 >= 3000 才换片** →
+  旧片改名 `.bak-4k`（已有就加序号，绝不覆盖）。
+  站点给了假 4K（还是 1080P）或下载失败 → 删临时文件，**原片一个字节不动**。
+- `Online.UpdateIndexEntry`：升级后把 `bytes / duration_s / resolution` 写回 index.json。
+
+**没做**（明天继续）：多屏适配、按屏幕分辨率决定入库版本、B 站图集的 4K 原图直链。
+
+### 5. 远程备份：卡在授权，不是卡在代码
+
+- 本地 `main` 已到 `8d35b90`（本轮提交后更新），`.git` 只有 1.8MB；
+- `.gitignore` 已挡掉 `appdata/`（含可能带 Key 的 config.json）、`dist/`、`app/bin/`、
+  `.selftest-tmp/`、`.workbuddy/`，`git ls-files` 里没有配置或密钥；
+- **但推不上去**，三个事实：
+  1. `https://github.com/dingdingdang460/my-shell-learning` 用主人账号的 GitHub 连接器查是 **404**；
+  2. 本机没有 SSH key（`~/.ssh` 只有 known_hosts），HTTPS 没有存凭据（GCM 非交互读不到用户名）；
+  3. 全局 git 配置把 `https://github.com/` 重写成 `https://ghproxy.net/https://github.com/`，
+     推送会被这个镜像挡掉。
+  需要主人给一条通路（PAT 或本地跑一次 `git push` 让 GCM 登录），仓库地址也要确认。
+
+### 6. 时段轮换是什么意思（主人问）
+
+现在的轮换是「**固定间隔**」：每 N 分钟（默认 180）换下一张，跟时间点无关。
+时段轮换 = 按**一天里的时间段**挑不同组壁纸，例如
+`08:00-18:00 白天组`、`18:00-23:00 傍晚组`、`23:00-08:00 深夜组`，
+需要给壁纸加「时段」标签或分组，到点自动切到那一组的图。
+功能未做，属于「想清楚规则再动」的一类。
+
+### 7. 自检结果
+
+```
+--guardtest        25/25   （新增：连视频一起删、自检清回收站记录）
+--uhdtest           7/7    （新：4K 选源 / 升级 / 假 4K 拒绝 / 下载失败 / 备份不覆盖）
+--contenttest       6/6    （新增：同一视频第二次打开只试 1 种格式）
+--badgetest        28/28
+--switchmotiontest 17/17
+build.log / build-player.log 均 0 字节
+```

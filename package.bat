@@ -15,7 +15,7 @@ rem  11-15: DEFAULT channel is WorkBuddy credits (no API Key needed);
 rem  switch to "Service API Key" in Settings only for paid direct generation.
 rem ============================================================
 
-set "VER=v0.9.10"
+set "VER=v0.9.11"
 set "DST=dist\WallpaperManager-%VER%"
 
 if not exist "app\bin\WallpaperManager.exe" goto :nobuild

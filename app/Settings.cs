@@ -71,6 +71,7 @@ namespace WallpaperManager
         readonly CheckBox pauseOnBatteryBox = new CheckBox();   // 11-16 功耗守卫
         readonly TextBox batteryPctBox = new TextBox();
         readonly CheckBox autoDelogoBox = new CheckBox();       // 11-16 角标验收
+        readonly CheckBox prefer4kBox = new CheckBox();         // 11-16 4K 优先
         readonly TextBox ffmpegBox = new TextBox();
         readonly TextBlock ffmpegState = new TextBlock();
         readonly TextBox proxyBox = new TextBox();
@@ -185,6 +186,11 @@ namespace WallpaperManager
 
             StyleCheck(filterPortraitBox, "B 站图集里过滤竖版图（默认关，竖图会自动适配屏幕）");
             root.Children.Add(filterPortraitBox);
+
+            // 11-16 4K：入库时优先下 3840x2160。默认关 —— 体积和解码压力约 4 倍，
+            // 1080P 的屏幕上看不出差别。已有条目的单张升级走右键「升级为 4K」。
+            StyleCheck(prefer4kBox, "下载视频时优先 4K（3840x2160，体积约 4 倍，只有 4K 屏看得出差别）");
+            root.Children.Add(prefer4kBox);
 
             // 动态壁纸
             root.Children.Add(Label("动态壁纸帧率上限（15-60）"));
@@ -928,6 +934,7 @@ namespace WallpaperManager
             pauseOnBatteryBox.IsChecked = c.PauseOnBattery;
             batteryPctBox.Text = c.BatteryPausePercent.ToString(CultureInfo.InvariantCulture);
             autoDelogoBox.IsChecked = c.AutoDelogo;
+            prefer4kBox.IsChecked = c.Prefer4k;
             ffmpegBox.Text = c.FfmpegPath == null ? "" : c.FfmpegPath;
             ffmpegState.Text = "";
             RefreshFfmpegState();
@@ -984,6 +991,7 @@ namespace WallpaperManager
             // 11-16 角标验收：开关 + ffmpeg 路径。路径留空即自动发现，
             // 填了但跑不起来也不拦保存（可能只是临时没插移动盘），探测结果在界面上说明。
             c.AutoDelogo = autoDelogoBox.IsChecked == true;
+            c.Prefer4k = prefer4kBox.IsChecked == true;
             c.FfmpegPath = ffmpegBox.Text == null ? "" : ffmpegBox.Text.Trim();
             app.SyncWatermarkFfmpeg();
 

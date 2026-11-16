@@ -591,6 +591,28 @@ namespace WallpaperManager
         }
 
         /// <summary>
+        /// **只读**定位这条壁纸的片子（不复制、不改名、不写库），找不到返回空串。
+        /// 给「删除壁纸时连片子一起删」用：Find 会在命中散片时把文件复制成规范名，
+        /// 删除流程不需要这种副作用，只需要知道那个文件在哪。
+        /// </summary>
+        public static string LocateReadOnly(string libRoot, WallpaperItem it, string imagePath)
+        {
+            if (it == null || it.IsVideo || string.IsNullOrEmpty(it.Id)
+                || string.IsNullOrEmpty(libRoot)) return "";
+            try
+            {
+                string canonical = CloudGen.VideoPath(libRoot, it.Id);
+                if (File.Exists(canonical)) return canonical;
+
+                bool inferred;
+                string src = FindSource(libRoot, it, imagePath, out inferred);
+                if (src == null) return "";
+                return File.Exists(src) ? src : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
         /// 返回可播的规范路径 videos\&lt;id&gt;.mp4；没有任何相关视频时返回 null。
         /// 找到的文件不在规范位置就复制一份过去（原文件保留），并写日志说明来源。
         /// 内容判定命中的散片例外：直接播原文件，不复制、不改名、不往壁纸库写文件。
