@@ -3660,8 +3660,20 @@ namespace WallpaperManager
         /// （规范名 / 备份 / 同画面散片都算），这里就收掉待领工单、把卡片标成动态、
         /// 需要的话自动换上桌面。没到货时什么都不做，绝不假装正在生成。
         /// </summary>
+        /// <summary>
+        /// 积分通道收货开关：自检进程一律关闭。收货会写真实 videos\、改 index.json、
+        /// 标动态，而自检模式下的角标验收是「直接算干净」，等于让没验的片子入库。
+        /// </summary>
+        public static bool BuddySweepEnabled { get { return !SelfTestArgs(); } }
+
         void SweepBuddyJobs()
         {
+            // 11-16：自检进程一律不收货。收货会真往 videos\ 写片子、改 index.json、标动态，
+            // 而且 VerifyDeliveredVideo 在自检模式下是「跳过验收直接算干净」——
+            // 等于把没验角标的片子塞进真实库。16:29 跑 --badgetest 时就是这么把
+            // biliart-21242299-3.mp4 收进 D:\Wallpaper 的（事后抽帧复核是干净的，但这是运气）。
+            // 自检只该验逻辑，不许动真实库。
+            if (!BuddySweepEnabled) return;
             try
             {
                 if (!Directory.Exists(CloudGen.BuddyDir)) return;
@@ -4238,6 +4250,7 @@ namespace WallpaperManager
             sb.Append(" / 永久删除 ").Append(rpt.Vanished);
             sb.Append(" / 没删掉 ").Append(rpt.Failed);
             sb.Append(" / 去向未确认 ").Append(rpt.Unverified);
+            if (rpt.Stashed > 0) sb.Append(" / 缩略图暂存 ").Append(rpt.Stashed);
             if (rpt.TrashDir.Length > 0) sb.Append(" / 副本 ").Append(rpt.TrashDir);
             return sb.ToString();
         }

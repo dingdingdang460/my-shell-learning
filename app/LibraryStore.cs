@@ -20,6 +20,13 @@ namespace WallpaperManager
         public int Failed;
         /// <summary>删掉了，但读不到回收站目录，去向未确认（副本留在 TrashDir）</summary>
         public int Unverified;
+        /// <summary>
+        /// 缩略图等「派生文件」没有送回收站，而是挪进 &lt;库根&gt;\.trash\covers\ 暂存。
+        /// 11-16 晚加：以前每张图删除会在 Windows 回收站里留下**两条**记录
+        /// （原图 + 缩略图），主人看到就问「为啥删一张图有两条」。缩略图是从原图派生的，
+        /// 没有单独还原的价值，进回收站只会把界面搞乱。
+        /// </summary>
+        public int Stashed;
         /// <summary>留了副本的目录；没留副本时为空串</summary>
         public string TrashDir = "";
 
@@ -135,6 +142,11 @@ namespace WallpaperManager
                     if (arch == null) arch = LoadTrashArchive(root);
                     Dictionary<string, object> rec;
                     if (arch.TryGetValue(id, out rec)) ApplyArchive(it, root, rec);
+
+                    // 缩略图删除时不进回收站，而是挪进 .trash\covers 暂存（回收站里只留
+                    // 原图那一条记录）。还原后 thumbs\ 里是空的，不把暂存那份接上，
+                    // 卡片会退回用整张大图当缩略图 —— 看着很正常，只是没必要。
+                    it.ThumbAbs = ResolveThumb(root, it, f);
                     list.Add(it);
                 }
             }
@@ -344,19 +356,135 @@ namespace WallpaperManager
             //    否则卡片显示成一串 biliart-xxxx，看着就像「根本没还原」。
             ArchiveEntry(root, item);
 
-            // 3) 删文件：主文件、缩略图、封面
+            // 3) 删文件：主内容（原图 / 视频 / 封面）进回收站；缩略图是派生文件，
+            //    挪进 .trash\covers 暂存 —— 否则每删一张图，Windows 回收站里就多出两条
+            //    记录（原图 + 缩略图），主人看着像「删重了」。缩略图没单独还原的价值。
             //    同一次删除共用一个 .trash\<时间戳> 目录，留给「没能进回收站」的文件当救命副本
             string stampDir = Path.Combine(Path.Combine(root, ".trash"),
                 DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Environment.TickCount);
-            DeleteUnder(root, ToAbs(root, item.File), stampDir, rpt);
-            DeleteUnder(root, ToAbs(root, item.Thumb), stampDir, rpt);
-            DeleteUnder(root, Path.Combine(root, "images", item.Id + ".jpg"), stampDir, rpt);
-            DeleteUnder(root, Path.Combine(root, "thumbs", item.Id + ".jpg"), stampDir, rpt);
-            DeleteUnder(root, Path.Combine(root, "images", item.Id + ".png"), stampDir, rpt);
 
-            // 3) 全部进了回收站 → 撤掉空目录，不留垃圾
+            List<string> primary = new List<string>();
+            List<string> derived = new List<string>();
+            AddTarget(root, primary, derived, ToAbs(root, item.File));
+            AddTarget(root, primary, derived, ToAbs(root, item.Thumb));
+            AddTarget(root, primary, derived, Path.Combine(root, "images", item.Id + ".jpg"));
+            AddTarget(root, primary, derived, Path.Combine(root, "thumbs", item.Id + ".jpg"));
+            AddTarget(root, primary, derived, Path.Combine(root, "images", item.Id + ".png"));
+
+            foreach (string p in primary) DeleteUnder(root, p, stampDir, rpt);
+
+            // 主文件一个都没删掉（库里只剩一张缩略图）时，缩略图就是唯一的内容，
+            // 必须老老实实送回收站，不能为了「少一条记录」把它藏进 .trash。
+            bool primaryGone = rpt.Recycled + rpt.Vanished + rpt.Unverified > 0;
+            foreach (string p in derived)
+            {
+                if (primaryGone) StashDerived(root, p, stampDir, rpt);
+                else DeleteUnder(root, p, stampDir, rpt);
+            }
+
+            // 4) 没留副本 → 撤掉空目录，不留垃圾
             TrimTrash(root, stampDir, rpt);
             return true;
+        }
+
+        /// <summary>
+        /// 把候选删除路径分两组：进回收站的「主文件」、暂存的「派生文件（缩略图）」。
+        /// 越界（不在库根之下）、不存在、重复的一律丢掉。
+        /// </summary>
+        static void AddTarget(string root, List<string> primary, List<string> derived, string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch { return; }
+
+            string guard = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar)
+                         + Path.DirectorySeparatorChar;
+            if (!full.StartsWith(guard, StringComparison.OrdinalIgnoreCase)) return;
+            if (!File.Exists(full)) return;
+            if (primary.Contains(full) || derived.Contains(full)) return;
+
+            string thumbDir = Path.GetFullPath(Path.Combine(root, "thumbs"))
+                                .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (full.StartsWith(thumbDir, StringComparison.OrdinalIgnoreCase)) derived.Add(full);
+            else primary.Add(full);
+        }
+
+        /// <summary>
+        /// 派生文件（缩略图）删除：挪进 &lt;库根&gt;\.trash\covers\ 暂存，**不进回收站**。
+        /// 这样删一张图在回收站里只留一条记录；还原原图后 Load 收编会拿这份缩略图，
+        /// 卡片看起来和删之前一样。挪不动（被占用 / 没权限）就退回送回收站，绝不丢文件。
+        /// </summary>
+        static void StashDerived(string root, string path, string stampDir, DeleteReport rpt)
+        {
+            try
+            {
+                string dir = Path.Combine(Path.Combine(root, ".trash"), "covers");
+                Directory.CreateDirectory(dir);
+                string keep = Path.Combine(dir, Path.GetFileName(path));
+                if (File.Exists(keep)) File.Delete(keep);     // 同 id 再删一次，旧副本没用了
+                File.Move(path, keep);                        // 同卷移动，不产生回收站记录
+                rpt.Stashed++;
+                PruneCovers(dir, 200);
+            }
+            catch
+            {
+                DeleteUnder(root, path, stampDir, rpt);       // 暂存失败 → 按主文件处理
+            }
+        }
+
+        /// <summary>缩略图暂存区只留最近 200 个，别让 .trash 无限长大</summary>
+        static void PruneCovers(string dir, int keep)
+        {
+            try
+            {
+                string[] files = Directory.GetFiles(dir);
+                if (files.Length <= keep) return;
+                Array.Sort(files, delegate(string a, string b)
+                {
+                    return File.GetLastWriteTimeUtc(a).CompareTo(File.GetLastWriteTimeUtc(b));
+                });
+                for (int i = 0; i < files.Length - keep; i++)
+                {
+                    try { File.Delete(files[i]); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>还原后缩略图暂存的位置：&lt;库根&gt;\.trash\covers\&lt;id&gt;.jpg</summary>
+        public static string StashedCover(string root, string id)
+        {
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(id)) return "";
+            try
+            {
+                string p = Path.Combine(Path.Combine(root, ".trash"), "covers", id + ".jpg");
+                return File.Exists(p) ? p : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// 收编散图时决定用哪张当缩略图：thumbs\ 里有就用、没有就用删除时暂存那份、
+        /// 都没有就退回原图（大图当缩略图只是慢一点，总比空着强）。
+        /// 注意不能先看 ThumbAbs —— 散图默认把它指成原图，那样永远轮不到暂存那份。
+        /// </summary>
+        static string ResolveThumb(string root, WallpaperItem it, string imagePath)
+        {
+            try
+            {
+                string std = Path.Combine(Path.Combine(root, "thumbs"), it.Id + ".jpg");
+                if (File.Exists(std)) return std;
+
+                string stash = StashedCover(root, it.Id);
+                if (stash.Length > 0) return stash;
+
+                if (it.ThumbAbs.Length > 0 && File.Exists(it.ThumbAbs)
+                    && !string.Equals(it.ThumbAbs, imagePath, StringComparison.OrdinalIgnoreCase))
+                    return it.ThumbAbs;
+            }
+            catch { }
+            return imagePath;
         }
 
         /// <summary>

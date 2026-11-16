@@ -2142,6 +2142,8 @@ namespace WallpaperManager
             // 记账口径：删除要回报「几个进了回收站」，界面才敢说「可还原」
             bool tallyOk = false;
             bool adoptTitleOk = false;
+            bool stashOk = false;
+            bool adoptThumbOk = false;
             string libTmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-lib-" + Environment.TickCount);
             try
             {
@@ -2162,9 +2164,18 @@ namespace WallpaperManager
                 string derr;
                 DeleteReport dr;
                 bool ok = LibraryStore.Delete(fake, libTmp, out derr, out dr);
-                tallyOk = ok && dr.Recycled == 2 && dr.Vanished == 0 && dr.Failed == 0
+
+                // 11-16 晚：主人问「为啥删一张图回收站里是两条记录」—— 因为旧代码把原图和
+                // 缩略图各送一次回收站。缩略图是派生文件，现在挪进 .trash\covers 暂存，
+                // 回收站里只留原图那一条。这条断言就钉住「一张图 = 一条记录」。
+                string stashPath = Path.Combine(libTmp, ".trash", "covers", "zz-guard-1.jpg");
+                tallyOk = ok && dr.Recycled == 1 && dr.Stashed == 1
+                          && dr.Vanished == 0 && dr.Failed == 0
                           && !File.Exists(Path.Combine(libTmp, "images", "zz-guard-1.jpg"));
+                stashOk = File.Exists(stashPath)
+                          && !File.Exists(Path.Combine(libTmp, "thumbs", "zz-guard-1.jpg"));
                 sb.Append("  （删除记账：进回收站=").Append(dr.Recycled)
+                  .Append(" 缩略图暂存=").Append(dr.Stashed)
                   .Append(" 永久=").Append(dr.Vanished)
                   .Append(" 失败=").Append(dr.Failed)
                   .Append(" 未确认=").Append(dr.Unverified).Append("）\r\n");
@@ -2174,8 +2185,17 @@ namespace WallpaperManager
                 File.WriteAllText(Path.Combine(libTmp, "images", "zz-guard-1.jpg"), "x", new UTF8Encoding(false));
                 List<WallpaperItem> back = LibraryStore.Load(libTmp);
                 string gotTitle = "";
-                for (int i = 0; i < back.Count; i++) if (back[i].Id == "zz-guard-1") gotTitle = back[i].Title;
+                string gotThumb = "";
+                for (int i = 0; i < back.Count; i++)
+                {
+                    if (back[i].Id != "zz-guard-1") continue;
+                    gotTitle = back[i].Title;
+                    gotThumb = back[i].ThumbAbs;
+                }
                 adoptTitleOk = (gotTitle == "guard");
+                // 缩略图没进回收站，还原后 thumbs\ 是空的 —— 收编要能接上暂存那份，
+                // 不然卡片就退回拿整张大图当缩略图（能用，但白白丢掉原有的预览尺寸）
+                adoptThumbOk = (gotThumb == stashPath);
                 sb.Append("  （还原后标题：").Append(gotTitle.Length == 0 ? "（没收录）" : gotTitle).Append("）\r\n");
             }
             catch (Exception ex)
@@ -2186,8 +2206,10 @@ namespace WallpaperManager
             {
                 try { if (Directory.Exists(libTmp)) Directory.Delete(libTmp, true); } catch { }
             }
-            Hit(sb, ref pass, ref total, "删除回报账目：两个文件都记账为「已进回收站」", tallyOk, "");
+            Hit(sb, ref pass, ref total, "删除回报账目：一张图只留一条回收站记录（原图），缩略图不计入", tallyOk, "");
+            Hit(sb, ref pass, ref total, "缩略图不进回收站：挪进 .trash\\covers 暂存", stashOk, "");
             Hit(sb, ref pass, ref total, "还原后刷库收编：标题从删除存档里捡回来，不是一串 id", adoptTitleOk, "");
+            Hit(sb, ref pass, ref total, "还原后缩略图接上暂存那份，不退回用整张大图", adoptThumbOk, "");
 
             // 11-16 晚：从回收站还原回来的图，刷新库必须能看见。
             // 还原只把文件放回 images\，索引里没有它 —— 全靠 Load 的「散图收编」这一段。
@@ -2281,6 +2303,13 @@ namespace WallpaperManager
             }
             catch (Exception ex) { sb.Append("  （老配置回填异常：").Append(ex.Message).Append("）\r\n"); }
             Hit(sb, ref pass, ref total, "老配置没有这些键 → 守卫 开/20%、角标验收 开、ffmpeg 自动找", legacy, "");
+
+            // ---- 七、自检进程不许收积分通道的货 ----
+            // 16:29 跑 --badgetest 时，后台扫描把一张真实工单的 mp4 收进 D:\Wallpaper，
+            // 而自检模式下角标验收是「直接算干净」的 —— 等于让没验的片子入库。
+            // 这条是闸门的看门犬：谁把 BuddySweepEnabled 改回恒真，它立刻失败。
+            Hit(sb, ref pass, ref total, "自检进程不收货：积分通道扫描在自检里被关掉",
+                !App.BuddySweepEnabled, "");
 
             return Finish(sb, pass, total);
         }
