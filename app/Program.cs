@@ -1934,7 +1934,7 @@ namespace WallpaperManager
                 sb.Append("发现 ").Append(bad.Count).Append(" 个视频带「AI生成」角标：\r\n\r\n");
                 for (int i = 0; i < names.Count && i < 12; i++) sb.Append("· ").Append(names[i]).Append("\r\n");
                 if (names.Count > 12) sb.Append("…… 另有 ").Append(names.Count - 12).Append(" 个\r\n");
-                sb.Append("\r\n现在就修补吗？会重新编码这些片子（画质按 CRF 16，肉眼看不出差别），")
+                sb.Append("\r\n现在就修补吗？会重新编码这些片子（画质按 CRF 18，肉眼看不出差别，体积约涨三成），")
                   .Append("原文件留 .bak-wm 备份。修补后复查不干净的会保留 .bak-wm 原样不动。");
                 // 问话必须回到 UI 线程，而且要在这里等答案（后面的活儿依赖「修不修」）
                 string ask = sb.ToString();

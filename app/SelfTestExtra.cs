@@ -2338,7 +2338,65 @@ namespace WallpaperManager
             }
             finally { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
 
+            // ---- 五、拿真实带角标的片子跑一遍（可选，命令行传一个 mp4 路径才会跑）----
+            // 合成方框描边毕竟不是真的「AI生成」角标：圆角、半透明、与背景同色这些
+            // 特性只有真片子才有。所以允许把一份**副本**传进来（原件不动），
+            // 用同一套生产代码走完 检测 → 删备份 → delogo → 复查。
+            // 用法：WallpaperManager.exe --watermarktest D://副本//带角标.mp4
+            string sample = SelfTestMp4Arg();
+            if (sample == null)
+            {
+                sb.Append("　（没传真实样本，跳过真实片复核）\r\n");
+            }
+            else
+            {
+                string sdir = Path.Combine(Path.GetTempPath(), "wb-wmreal-" + Environment.TickCount);
+                try
+                {
+                    Directory.CreateDirectory(sdir);
+                    string copy = Path.Combine(sdir, Path.GetFileName(sample));
+                    File.Copy(sample, copy, true);
+                    long origSize = new FileInfo(copy).Length;
+
+                    string err;
+                    Watermark.Badge b0 = Watermark.Measure(copy, 1.0, out err);
+                    Hit(sb, ref pass, ref total, "真实样本：抽帧检出角标",
+                        b0 != null && b0.Found, b0 == null ? err : b0.Text());
+
+                    Watermark.Outcome o = Watermark.VerifyAndRepair(copy);
+                    Hit(sb, ref pass, ref total, "真实样本：修补成功", o.Clean && o.Repaired, o.Msg);
+
+                    Watermark.Badge b1 = Watermark.Measure(copy, 1.0, out err);
+                    Hit(sb, ref pass, ref total, "真实样本：修补后复查干净",
+                        b1 != null && !b1.Found, b1 == null ? err : b1.Text());
+
+                    long nowSize = new FileInfo(copy).Length;
+                    Hit(sb, ref pass, ref total, "真实样本：片子仍可读、大小合理",
+                        nowSize > origSize / 4 && nowSize < origSize * 4,
+                        origSize + " → " + nowSize + " 字节");
+                }
+                catch (Exception ex)
+                {
+                    Hit(sb, ref pass, ref total, "真实样本复核没有抛异常", false,
+                        ex.GetType().Name + "：" + ex.Message);
+                }
+                finally { try { if (Directory.Exists(sdir)) Directory.Delete(sdir, true); } catch { } }
+            }
+
             return Finish(sb, pass, total);
+        }
+
+        /// <summary>命令行里第一个真实存在的 .mp4 路径（自检可选样本；没有就返回 null）。</summary>
+        static string SelfTestMp4Arg()
+        {
+            string[] a = Environment.GetCommandLineArgs();
+            for (int i = 1; i < a.Length; i++)
+            {
+                if (!a[i].EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)) continue;
+                try { if (File.Exists(a[i])) return a[i]; }
+                catch { }
+            }
+            return null;
         }
 
         /// <summary>自检里直接起 ffmpeg 造素材，不经过 Watermark 内部（避免自己验自己）。</summary>

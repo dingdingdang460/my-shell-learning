@@ -463,7 +463,7 @@ namespace WallpaperManager
                           + ":w=" + before.W + ":h=" + before.H;
                 string args = "-hide_banner -loglevel error -y -i \"" + mp4 + "\""
                             + " -map 0:v:0 -vf \"" + vf + "\""
-                            + " -c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p -an"
+                            + " -c:v libx264 -crf 18 -preset slow -pix_fmt yuv420p -an"
                             + " \"" + tmp + "\"";
                 string o, e;
                 if (!RunCapture(ff, args, 10 * 60 * 1000, out o, out e) || !File.Exists(tmp))
