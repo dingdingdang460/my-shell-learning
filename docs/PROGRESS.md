@@ -1875,8 +1875,11 @@ WallpaperManager.exe --fixlogo --dry    只列清单，不改任何文件
 回归：`--guardtest` 17/17、`--badgetest` 28/28、`--switchmotiontest` 17/17，
 `build.log` / `build-player.log` 均 0 字节。
 
-### 5. 留给主人的两个决定
+### 5. 主人的两个决定（11-16 15:47 已执行）
 
-- 15:17 那张 `biliart-7417054-5` 要不要从回收站还原并补回索引（要写 `D:\Wallpaper`）。
-- 自检历史遗留：`D:\$Recycle.Bin` 里积了 400+ 条 `wb-guardtest-*` / `.selftest-tmp` 的
-  `$I` 记录（工作空间的临时文件被回收站收走了）。要不要一并清掉。
+- 15:17 删掉的 `biliart-7417054-5`：主人选「先不用，留在回收站」，**没有动 `D:\Wallpaper`**，
+  两张文件仍在回收站里（`$R4W8PVH.jpg` / `$RSANKG9.jpg`，R 实体齐全），随时可自己右键还原。
+- 回收站里的自检遗留：已按前缀清掉 `.selftest-tmp\*`（482 条）、`wb-guardtest*`、
+  `dist\WallpaperManager-*` 旧打包产物（40 条），共 **484 条 / 释放约 70.75 MB**，失败 0。
+  保留 24 条：主人自己的删除记录（Epic、常用软件、汇接数据表等）＋ `app\BuddyCli.cs`
+  （早期 CLI 方案删掉的源码，不算自检垃圾）。
