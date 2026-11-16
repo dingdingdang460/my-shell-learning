@@ -595,6 +595,12 @@ namespace WallpaperManager
             string savedKey = app.Config.GenApiKey;
             string savedModel = app.Config.GenModel;
             string savedPending = app.Config.PendingCloudId;
+            // 11-16：这段自检测的是「服务商 API 通道缺配置时的总闸」，
+            // 必须把出片通道也固定成 api。真实 config 默认是 buddy 时，
+            // RegenCloud 会走进 StartBuddyGen 的积分确认框，自检就卡在那里等人点。
+            string savedChannel = app.Config.GenChannel;
+            bool savedNoBuddyDialogs = App.SelfTestNoBuddyDialogs;
+            MessageBoxResult savedBuddyAnswer = App.SelfTestBuddyAnswer;
             bool savedNoDialogs = App.SelfTestNoDialogs;
             MessageBoxResult savedAnswer = App.SelfTestCloudAnswer;
             bool savedNoRegenDialogs = App.SelfTestNoRegenDialogs;
@@ -617,7 +623,10 @@ namespace WallpaperManager
                 app.Config.GenApiKey = "";
                 app.Config.GenModel = "";
                 app.Config.PendingCloudId = "";
+                app.Config.GenChannel = "api";
                 App.SelfTestNoDialogs = true;
+                App.SelfTestNoBuddyDialogs = true;
+                App.SelfTestBuddyAnswer = MessageBoxResult.No;
                 App.SelfTestCloudAnswer = MessageBoxResult.No;   // 选「先不生成」，不开设置窗口
                 App.SelfTestNoRegenDialogs = true;
                 App.SelfTestRegenAnswer = MessageBoxResult.No;
@@ -705,8 +714,11 @@ namespace WallpaperManager
                 app.Config.GenApiKey = savedKey;
                 app.Config.GenModel = savedModel;
                 app.Config.PendingCloudId = savedPending;
+                app.Config.GenChannel = savedChannel;
                 ConfigStore.DirOverride = savedDirOverride;
                 App.SelfTestNoDialogs = savedNoDialogs;
+                App.SelfTestNoBuddyDialogs = savedNoBuddyDialogs;
+                App.SelfTestBuddyAnswer = savedBuddyAnswer;
                 App.SelfTestCloudAnswer = savedAnswer;
                 App.SelfTestNoRegenDialogs = savedNoRegenDialogs;
                 App.SelfTestRegenAnswer = savedRegenAnswer;
@@ -2029,6 +2041,122 @@ namespace WallpaperManager
                 RelatedVideo.Invalidate();
                 try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
             }
+            return Finish(sb, pass, total);
+        }
+
+        /// <summary>
+        /// 11-16：日常使用缺口里的三项 —— 功耗守卫判定、删除进回收站、配置字段往返。
+        /// 功耗判定全部是纯函数组合，不依赖本机是否真在用电池；
+        /// 回收站用 TEMP 里的临时文件/目录验证「删完真的不在了」，不碰任何真实壁纸；
+        /// 配置往返只写 TEMP 里的临时 json，不动真实 config.json。
+        /// </summary>
+        public static string GuardTest(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+            string why;
+
+            // ---- 一、该暂停的必须暂停 ----
+            bool p1 = PowerGuard.Decide(0, 15, 20, true, out why);
+            Hit(sb, ref pass, ref total, "电池 15% / 阈值 20% → 暂停", p1, why);
+
+            bool p2 = PowerGuard.Decide(0, 20, 20, true, out why);
+            Hit(sb, ref pass, ref total, "电量正好等于阈值 → 暂停（边界含）", p2, why);
+
+            // ---- 二、不该暂停的必须放过 ----
+            bool n1 = PowerGuard.Decide(0, 21, 20, true, out why);
+            Hit(sb, ref pass, ref total, "电池 21% / 阈值 20% → 继续播", !n1, why);
+
+            bool n2 = PowerGuard.Decide(1, 5, 20, true, out why);
+            Hit(sb, ref pass, ref total, "插着电 5% → 继续播", !n2, why);
+
+            bool n3 = PowerGuard.Decide(0, 5, 20, false, out why);
+            Hit(sb, ref pass, ref total, "守卫关闭 → 继续播", !n3, why);
+
+            bool n4 = PowerGuard.Decide(0, 255, 20, true, out why);
+            Hit(sb, ref pass, ref total, "电量未知（255）→ 继续播", !n4, why);
+
+            bool n5 = PowerGuard.Decide(255, 5, 20, true, out why);
+            Hit(sb, ref pass, ref total, "电源状态未知（255）→ 继续播", !n5, why);
+
+            bool n6 = PowerGuard.Decide(0, 90, 150, true, out why);
+            Hit(sb, ref pass, ref total, "阈值 150 夹到 100 → 90% 暂停", n6, why);
+
+            bool n7 = PowerGuard.Decide(0, 90, -5, true, out why);
+            Hit(sb, ref pass, ref total, "阈值 -5 夹到 0 → 90% 继续播", !n7, why);
+
+            // ---- 三、真实读电源状态不抛异常、取值在合法区间 ----
+            bool onBattery;
+            int pct;
+            string readWhy;
+            bool readOk = PowerGuard.TryRead(out onBattery, out pct, out readWhy);
+            bool sane = !readOk || pct == 255 || (pct >= 0 && pct <= 100);
+            Hit(sb, ref pass, ref total, "真实读电源状态（异常安全、取值合法）",
+                sane && (readOk || !string.IsNullOrEmpty(readWhy)),
+                readOk ? ("电源=" + (onBattery ? "电池" : "交流") + " 电量=" + pct + "%")
+                       : ("读不到：" + readWhy));
+
+            // ---- 四、回收站：临时文件 / 子目录删完真的不在 ----
+            string dir = Path.Combine(Path.GetTempPath(), "wb-guardtest-" + Environment.TickCount);
+            string f1 = Path.Combine(dir, "recycle-me.txt");
+            string sub = Path.Combine(dir, "sub");
+            string f2 = Path.Combine(sub, "nested.txt");
+            bool recOk = false;
+            bool dirOk = false;
+            try
+            {
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(f1, "recycle me " + DateTime.Now.Ticks, new UTF8Encoding(false));
+                Directory.CreateDirectory(sub);
+                File.WriteAllText(f2, "nested " + DateTime.Now.Ticks, new UTF8Encoding(false));
+
+                recOk = Recycle.MoveToRecycleBin(f1) && !File.Exists(f1);
+                dirOk = Recycle.MoveToRecycleBin(sub) && !Directory.Exists(sub);
+            }
+            catch (Exception ex)
+            {
+                sb.Append("  （回收站测试异常：").Append(ex.Message).Append("）\r\n");
+            }
+            finally
+            {
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+            }
+            Hit(sb, ref pass, ref total, "单个文件进回收站 → 原路径消失", recOk, "");
+            Hit(sb, ref pass, ref total, "整个子目录进回收站 → 原路径消失", dirOk, "");
+
+            // ---- 五、配置字段往返 ----
+            string tmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-cfg.json");
+            bool round = false;
+            try
+            {
+                AppConfig t = new AppConfig();
+                t.PauseOnBattery = false;
+                t.BatteryPausePercent = 35;
+                bool wrote = ConfigStore.WriteTo(t, tmp);
+                AppConfig back = wrote ? ConfigStore.LoadFrom(tmp) : null;
+                round = wrote && back != null
+                     && back.PauseOnBattery == false
+                     && back.BatteryPausePercent == 35;
+                if (File.Exists(tmp)) File.Delete(tmp);
+            }
+            catch (Exception ex) { sb.Append("  （配置往返异常：").Append(ex.Message).Append("）\r\n"); }
+            Hit(sb, ref pass, ref total, "pauseOnBattery / batteryPausePercent 落盘往返", round, "");
+
+            // ---- 六、老配置缺键时回填默认值（守卫开、20%）----
+            string legacyFile = Path.Combine(Path.GetTempPath(), "wb-guardtest-old.json");
+            bool legacy = false;
+            try
+            {
+                File.WriteAllText(legacyFile,
+                    "{\r\n  \"libRoot\": \"D:\\\\Wallpaper\",\r\n  \"intervalMinutes\": 180\r\n}",
+                    new UTF8Encoding(false));
+                AppConfig back = ConfigStore.LoadFrom(legacyFile);
+                legacy = back.PauseOnBattery == true && back.BatteryPausePercent == 20;
+                if (File.Exists(legacyFile)) File.Delete(legacyFile);
+            }
+            catch (Exception ex) { sb.Append("  （老配置回填异常：").Append(ex.Message).Append("）\r\n"); }
+            Hit(sb, ref pass, ref total, "老配置没有功耗键 → 默认 开 / 20%", legacy, "");
+
             return Finish(sb, pass, total);
         }
 

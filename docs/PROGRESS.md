@@ -1485,3 +1485,85 @@ docs/PROGRESS.md              本文件
 `package.bat` / `docs/readme.txt` 升 **v0.9.3**，重新打包
 `dist\WallpaperManager-v0.9.3.zip`。待办不变：远程 URL、`index.json` 里
 新图误写的动效标记、`jobs\done\` 假工单、真 Key 链路，均按权限边界等主人授权。
+
+## 二十一、11-16：功耗守卫、崩溃兜底、删除进回收站（v0.9.5）
+
+### 1. 这一轮做什么
+
+15 号的交接文档把日常使用缺口按阻断程度分了 P0/P1/P2。本轮只做其中
+**需求明确、不依赖架构选择**的三项（P1-4 / P1-5 / P1-6），
+P0-1 出片提速、P0-2 delogo 内建、P1-3 多屏都需要主人先定方向，没有动。
+
+### 2. 改动
+
+- 新增 `app/PowerGuard.cs`：`GetSystemPowerStatus` 读真实电源状态；
+  判定抽成纯函数 `Decide(acLine, percent, threshold, pauseOnBattery, out why)`，
+  只有「开着守卫 + 确实电池 + 电量已知且不高于阈值」才返回 true。
+  电量未知（255）、插着电、守卫关闭一律不暂停。
+- 新增 `app/Recycle.cs`：`SHFileOperation` + `FOF_ALLOWUNDO` 把文件/目录送回收站。
+  返回 false（网络盘 / 策略关闭）时由调用方退回硬删，删除流程不被卡住。
+- `AppConfig` 加 `PauseOnBattery`（默认 true）/ `BatteryPausePercent`（默认 20）。
+  `Load` 缺键回填默认值，`WriteTo` 写出。`Json.Long` 缺键返回 0，
+  所以阈值只用「>0 且在 0-100 内」覆盖，关守卫请用 `pauseOnBattery=false`。
+- `Program`：
+  - `InstallCrashHandlers`：`DispatcherUnhandledException` 接住界面线程异常、
+    只弹一次可读提示并继续运行；`AppDomain.UnhandledException` 兜后台线程。
+    两者都写 `%TEMP%\wallpaper-crash-YYYYMMDD-HHmmss.log` 并进运行日志。
+  - `OpenLog` + 托盘「打开日志」：不用再人工翻临时目录。
+  - `SetupPowerWatch` / `CheckPower`：60 秒一次，电池低电 `Dynamic.Pause()`，
+    插电 `Dynamic.Resume()`；`--*test` / `--probe*` 下不启动，避免干扰播放状态断言。
+  - `skipGreeting` 从一长串显式名单改成 `SelfTestArgs()`：
+    以后新加自检不用再记得补名字，不会莫名其妙弹全屏欢迎窗。
+- `LibraryStore`：`DeleteUnder` 先回收站、失败再硬删；顺带删掉那条
+  「功耗守卫：老配置里没有这两个键…」的注释 —— 它下面以前一行实现都没有。
+- `Settings`：加「电池供电且电量低时暂停动态壁纸」复选框 + 「电量阈值（0-100）」输入框。
+- `build.bat` 源码列表加 `PowerGuard Recycle`。
+
+### 3. 顺手修掉的真实缺陷（不是我这轮引入的）
+
+`--clouddialogtest` 在真实 `config.json` 的 `genChannel=buddy`（现在的默认值）时会卡死：
+这段自检本来测「服务商 API 缺配置时的总闸」，但 `RegenCloud` 在积分通道下会走
+`StartBuddyGen` 的确认框，而 `CloudConfigGuard` 只注入了 `SelfTestNoDialogs`、
+没有注入 `SelfTestNoBuddyDialogs`，于是真弹窗等用户点，自检永远等不到结论。
+修法：自检里把 `GenChannel` 固定为 `api`，同时注入 `SelfTestNoBuddyDialogs /
+SelfTestBuddyAnswer`，`finally` 原样还原。修后 20/20。
+
+### 4. 验证（全绿）
+
+- `build.bat --noboot` 两次，`build.log` / `build-player.log` 均 **0 字节**。
+- 新增 `--guardtest 14/14 PASS`：
+  功耗判定 9 项（15% 暂停 / 等于阈值也暂停 / 21% 放过 / 插电放过 / 守卫关闭放过 /
+  电量未知放过 / 电源状态未知放过 / 阈值 150 夹到 100 / 阈值 -5 夹到 0）、
+  真实读电源状态（本机交流 100%，异常安全）、
+  回收站单文件 + 整个子目录（原路径消失）、
+  新字段落盘往返、老配置缺键回填 开 / 20%。
+- 全量隔离回归 **14 项全 PASS**：
+  `--searchtest` PASS、`--importexporttest 11/11`、`--proxytest 9/9`、
+  `--videotest 7/7`、`--relatedvideotest 56/56`、`--orphantest 16/16`、
+  `--clouddialogtest 20/20`、`--contenttest 5/5`、`--badgetest 28/28`、
+  `--launchtest 11/11`、`--switchmotiontest 17/17`、`--buddyhinttest 51/51`、
+  `--autogentest 43/43`、`--guardtest 14/14`。
+- 设置页真渲染（`--settingstest` 截图 560×880）：功耗复选框与阈值框显示正常、
+  与其它控件对齐，无重叠或截断。
+- 真实启动验证：数据目录正确、动态壁纸恢复开播、无 crash 文件、进程存活。
+- 权限边界：`TEMP`/`TMP` 指向仓库内 `.selftest-tmp\`；
+  `D:\Wallpaper` 与 `appdata` 在今天 09:35 之后 **0 个文件改动**
+  （`find -newermt` 为空）；`jobs\queue` / `jobs\buddy` 均为空。
+- **如实记录的副作用**：`--guardtest` 的回收站断言按功能本义把 2 个几十字节的
+  测试文件（建在 `.selftest-tmp` 下）送进了系统回收站，清空回收站即可移除。
+
+### 5. 版本与未做
+
+`package.bat` 升 **v0.9.5**，打包 `dist\WallpaperManager-v0.9.5.zip`（282,466 字节）。
+
+没做、需要主人拍板的：
+
+1. **P0-1 云端出片提速**：接受小时级，还是打通客户端本地网关 50556
+   （要读客户端进程内存拿口令，属工作空间外操作）。
+2. **P0-2 delogo 内建成程序能力**：引用本机 WorkBuddy 自带 ffmpeg（脆弱），
+   还是随包分发一份（+100MB）。
+3. **P1-3 多屏**：每屏一个播放器实例，还是让用户选一块屏。
+4. **P2 出片秒数 3 秒 vs 平台最短 4 秒**：改上限会让按秒付费通道多花 1 秒的钱，
+   涉及费用口径，没有擅自改。
+5. **P2 收藏功能**：`SetFav` 至今零调用，补界面入口还是删死代码。
+

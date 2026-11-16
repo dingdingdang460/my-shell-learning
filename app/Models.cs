@@ -67,5 +67,12 @@ namespace WallpaperManager
         // ---- 缓存 ----
         // 自适应合成图（竖图补底衬、异形比例）的磁盘上限，单位 MB，超了删最旧的。
         public int CacheLimitMb = 300;
+
+        // ---- 功耗守卫（11-16）----
+        // 笔记本电池供电且电量不高于阈值时暂停动态壁纸解码，插电或电量回升自动恢复。
+        // 桌面机没有电池，GetSystemPowerStatus 报「交流供电」，这里永远不会触发。
+        // 老配置没有这两个键时：守卫默认开、阈值默认 20%。
+        public bool PauseOnBattery = true;
+        public int BatteryPausePercent = 20;
     }
 }

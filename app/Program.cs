@@ -50,6 +50,7 @@ namespace WallpaperManager
             {
                 Desk.EnableDpiAwareness();
                 App app = new App();
+                InstallCrashHandlers(app);
                 app.Initialize();
                 app.Run();
             }
@@ -68,6 +69,53 @@ namespace WallpaperManager
             {
                 GC.KeepAlive(singleInstance);
             }
+        }
+
+        // ---------------- 11-16 全局异常兜底 ----------------
+        // 以前只有启动那一下包在 try 里：Run() 期间任何未捕获异常都直接让进程消失，
+        // 没有提示、没有日志，用户只看到「程序没了」。播放器早就注册了
+        // AppDomain.UnhandledException，管理器反而没有，这里补齐两层：
+        //   界面线程 —— 接住并继续跑（只弹一次可读提示，点掉不影响后续操作）
+        //   后台线程 —— CLR 会结束进程，至少把现场写进日志与独立 crash 文件
+        static bool crashDialogShown;
+
+        static void InstallCrashHandlers(App app)
+        {
+            app.DispatcherUnhandledException += delegate(object s, DispatcherUnhandledExceptionEventArgs e)
+            {
+                LogCrash("界面线程", e.Exception);
+                e.Handled = true;                     // 吃掉这一下，程序不退出
+                if (crashDialogShown) return;
+                crashDialogShown = true;
+                try
+                {
+                    MessageBox.Show(
+                        "壁纸管家遇到一个内部错误，已记录到日志，程序会继续运行。\r\n\r\n"
+                        + (e.Exception == null ? "" : e.Exception.Message)
+                        + "\r\n\r\n如果之后操作异常，请右键托盘图标 →「打开日志」把日志发出来。",
+                        "壁纸管家", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                catch { }
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
+            {
+                LogCrash("后台线程", e.ExceptionObject as Exception);
+            };
+        }
+
+        static void LogCrash(string where, Exception ex)
+        {
+            try
+            {
+                string msg = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  [" + where + "]\r\n"
+                           + (ex == null ? "（无异常对象）" : ex.ToString());
+                Log.Note("崩溃：" + where + " · " + (ex == null ? "" : ex.Message));
+                string p = Path.Combine(Path.GetTempPath(),
+                    "wallpaper-crash-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
+                File.WriteAllText(p, msg, new UTF8Encoding(false));
+            }
+            catch { }
         }
     }
 
@@ -90,6 +138,11 @@ namespace WallpaperManager
         IntPtr sessionHwnd;
         DispatcherTimer fullscreenTimer;
         bool dynamicPausedByFullscreen;
+
+        // 11-16 功耗守卫：见 CheckPower()。pausedByPower 保证只暂停/恢复一次，
+        // 不会每 60 秒都往播放器发一遍暂停消息。
+        DispatcherTimer powerTimer;
+        bool pausedByPower;
 
         // 11-14 深夜：切换壁纸后「▶ 播放中」定格在上一张卡片上。
         // 根因是 DynamicEnabled / LastDynamicId / cursor / 界面角标各写各的，
@@ -165,6 +218,7 @@ namespace WallpaperManager
             SetupTray();
             SetupTimer();
             SetupFullscreenWatch();
+            SetupPowerWatch();
 
             win.Show();
             RestoreLastWallpaper();
@@ -174,7 +228,10 @@ namespace WallpaperManager
             // 探测/验证时不播欢迎动画：它是全屏窗口，会把桌面整个盖住，
             // 而且全屏检测还会顺手把动态壁纸暂停掉 —— 验证动态壁纸时等于自己挡自己。
             // （--dynvideo 就是「自动开播第一个视频」的一键验证开关，同样跳过）
-            bool skipGreeting = false;
+            // 11-16：--*test / --probe* 一律不播欢迎动画。以前这里是一长串显式名单，
+            // 新加自检忘了补名字，就会在自检时弹全屏欢迎窗、还会顺手暂停动态壁纸，
+            // 把播放状态的断言整个带偏。统一走 SelfTestArgs()，以后加自检不用再改这里。
+            bool skipGreeting = SelfTestArgs();
             foreach (string s in Environment.GetCommandLineArgs())
             {
                 if (s.StartsWith("--probe", StringComparison.OrdinalIgnoreCase)
@@ -825,6 +882,28 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --switchmotiontest：\r\n" + detail);
                         Log.Note("自检 --switchmotiontest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--guardtest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-16：功耗守卫判定、回收站删除、配置字段往返。
+                    // 全隔离：临时文件只落在 TEMP（自检时已指向仓库内 .selftest-tmp）。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.GuardTest(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --guardtest：\r\n" + detail);
+                        Log.Note("自检 --guardtest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -1620,6 +1699,10 @@ namespace WallpaperManager
             Forms.ToolStripMenuItem miSettings = new Forms.ToolStripMenuItem("设置…");
             miSettings.Click += delegate { OpenSettings(); };
 
+            // 11-16：日志一直在 %TEMP%，界面没有入口，出问题只能人工翻目录。
+            Forms.ToolStripMenuItem miLog = new Forms.ToolStripMenuItem("打开日志");
+            miLog.Click += delegate { OpenLog(); };
+
             Forms.ToolStripMenuItem miExit = new Forms.ToolStripMenuItem("退出");
             miExit.Click += delegate { Log.Note("托盘：退出"); ExitApp(); };
 
@@ -1650,6 +1733,7 @@ namespace WallpaperManager
             menu.Items.Add(miDyn);
             menu.Items.Add(miGreet);
             menu.Items.Add(miSettings);
+            menu.Items.Add(miLog);
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add(miExit);
             tray.ContextMenuStrip = menu;
@@ -1665,6 +1749,31 @@ namespace WallpaperManager
             else if (cursor >= 0 && cursor < Items.Count) s += " · 静态壁纸：" + Items[cursor].Title;
             if (s.Length > 63) s = s.Substring(0, 63);      // NotifyIcon.Text 上限
             try { tray.Text = s; } catch { }
+        }
+
+        /// <summary>
+        /// 打开运行日志。日志由 Log 按天归档、只留 7 天，所以「今天的文件不在」
+        /// 时退而打开它所在的目录，而不是弹一句「找不到」什么都不给。
+        /// </summary>
+        public void OpenLog()
+        {
+            try
+            {
+                string p = Log.Path0;
+                if (File.Exists(p))
+                {
+                    Process.Start("notepad.exe", "\"" + p + "\"");
+                    return;
+                }
+                string dir = Path.GetDirectoryName(p);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    Process.Start("explorer.exe", "\"" + dir + "\"");
+                else if (win != null) win.SetStatus("还没生成过日志文件");
+            }
+            catch (Exception ex)
+            {
+                if (win != null) win.SetStatus("打开日志失败：" + ex.Message);
+            }
         }
 
         /// <summary>跑播放器自检，结果直接弹窗（不用你去翻日志）</summary>
@@ -3618,6 +3727,53 @@ namespace WallpaperManager
             rotateTimer.Interval = TimeSpan.FromMinutes(Config.IntervalMinutes);
             rotateTimer.Tick += delegate { if (Config.AutoRotate) RotateNext(); };
             rotateTimer.Start();
+        }
+
+        /// <summary>
+        /// 11-16 功耗守卫：每 60 秒看一次电源状态。
+        ///
+        /// 只在「电池供电 + 电量不高于阈值」时暂停播放器解码，插电或电量回升自动恢复；
+        /// 暂停用的是播放器自己的 Pause 消息，不销毁播放器、不改 index.json 的动效标记，
+        /// 所以恢复时不用重新走一遍「找片子 → 开播」。
+        ///
+        /// 自检不启动这个定时器：否则电池低电会把播放器暂停，
+        /// --launchtest / --badgetest 这类断言播放状态的用例会无故漂移。
+        /// </summary>
+        void SetupPowerWatch()
+        {
+            if (SelfTestArgs()) return;
+            powerTimer = new DispatcherTimer();
+            powerTimer.Interval = TimeSpan.FromSeconds(60);
+            powerTimer.Tick += delegate { CheckPower(); };
+            powerTimer.Start();
+            CheckPower();      // 启动时先判一次：插着电没影响，拔着电且电量低就别开播
+        }
+
+        public void CheckPower()
+        {
+            if (!Dynamic.Running)
+            {
+                pausedByPower = false;
+                return;
+            }
+
+            string why;
+            bool pause = PowerGuard.ShouldPause(Config.PauseOnBattery, Config.BatteryPausePercent, out why);
+
+            if (pause && !pausedByPower)
+            {
+                Dynamic.Pause();
+                pausedByPower = true;
+                Log.Note("功耗守卫：暂停动态壁纸解码（" + why + "）");
+                if (win != null) win.SetStatus("功耗守卫：" + why + "，已暂停动态壁纸（插电自动恢复）");
+            }
+            else if (!pause && pausedByPower)
+            {
+                Dynamic.Resume();
+                pausedByPower = false;
+                Log.Note("功耗守卫：电源恢复，继续播放动态壁纸");
+                if (win != null) win.SetStatus("已恢复动态壁纸播放");
+            }
         }
 
         /// <summary>

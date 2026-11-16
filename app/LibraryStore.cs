@@ -278,7 +278,12 @@ namespace WallpaperManager
                 string guard = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar)
                              + Path.DirectorySeparatorChar;
                 if (!full.StartsWith(guard, StringComparison.OrdinalIgnoreCase)) return;
-                if (File.Exists(full)) File.Delete(full);
+                if (!File.Exists(full)) return;
+
+                // 11-16：先进回收站，误删还能捞回来；回收站不可用（网络盘 / 策略关闭）
+                // 才退回硬删，保持「删除就一定删掉」的旧语义，不让能力缺失卡住删除流程。
+                if (Recycle.MoveToRecycleBin(full)) return;
+                File.Delete(full);
             }
             catch { }
         }
@@ -586,10 +591,17 @@ namespace WallpaperManager
                 c.GenChannel = (chan == "api" || chan == "buddy") ? chan : "buddy";
                 c.BuddyExe = Json.Str(d, "buddyExe");
 
-                // 功耗守卫：老配置里没有这两个键 → 默认「电池供电时暂停」+ 20% 阈值
                 c.Proxy = Json.Str(d, "proxy");
                 long cmb = Json.Long(d, "cacheLimitMb");
                 if (cmb >= 50 && cmb <= 20000) c.CacheLimitMb = (int)cmb;
+
+                // 11-16 功耗守卫：以前这里只有一行写着「功耗守卫」的注释，实际没有任何检测代码。
+                // 现在真的读这两个键：老配置缺键 → 守卫默认开、阈值 20%。
+                // Json.Long 缺键返回 0，所以只用「>0 且在区间内」覆盖默认值；
+                // 想彻底关掉守卫用 pauseOnBattery=false，不需要把阈值填 0。
+                c.PauseOnBattery = Json.Bool(d, "pauseOnBattery", true);
+                long bpp = Json.Long(d, "batteryPausePercent");
+                if (bpp > 0 && bpp <= 100) c.BatteryPausePercent = (int)bpp;
             }
             catch { }
             return c;
@@ -629,7 +641,9 @@ namespace WallpaperManager
                 sb.Append("  \"genChannel\": ").Append(Json.Quote(c.GenChannel)).Append(",\r\n");
                 sb.Append("  \"buddyExe\": ").Append(Json.Quote(c.BuddyExe)).Append(",\r\n");
                 sb.Append("  \"proxy\": ").Append(Json.Quote(c.Proxy)).Append(",\r\n");
-                sb.Append("  \"cacheLimitMb\": ").Append(c.CacheLimitMb).Append("\r\n");
+                sb.Append("  \"cacheLimitMb\": ").Append(c.CacheLimitMb).Append(",\r\n");
+                sb.Append("  \"pauseOnBattery\": ").Append(c.PauseOnBattery ? "true" : "false").Append(",\r\n");
+                sb.Append("  \"batteryPausePercent\": ").Append(c.BatteryPausePercent).Append("\r\n");
                 sb.Append("}\r\n");
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
                 return true;

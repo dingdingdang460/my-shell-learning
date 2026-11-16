@@ -68,6 +68,8 @@ namespace WallpaperManager
         readonly CheckBox welcomeBootBox = new CheckBox();
         readonly CheckBox welcomeUnlockBox = new CheckBox();
         readonly CheckBox filterPortraitBox = new CheckBox();
+        readonly CheckBox pauseOnBatteryBox = new CheckBox();   // 11-16 功耗守卫
+        readonly TextBox batteryPctBox = new TextBox();
         readonly TextBox proxyBox = new TextBox();
         readonly TextBox cacheBox = new TextBox();
         readonly TextBlock cacheInfo = new TextBlock();
@@ -187,6 +189,16 @@ namespace WallpaperManager
             fpsBox.Width = 120;
             fpsBox.HorizontalAlignment = HorizontalAlignment.Left;
             root.Children.Add(fpsBox);
+
+            // 11-16 功耗守卫：笔记本拔电后视频壁纸会一直吃电，这里给一个真实的开关
+            StyleCheck(pauseOnBatteryBox, "电池供电且电量低时暂停动态壁纸（笔记本省电，默认开）");
+            root.Children.Add(pauseOnBatteryBox);
+
+            root.Children.Add(Label("电量阈值（不高于该百分比时暂停，0-100）"));
+            StyleInput(batteryPctBox);
+            batteryPctBox.Width = 120;
+            batteryPctBox.HorizontalAlignment = HorizontalAlignment.Left;
+            root.Children.Add(batteryPctBox);
 
             // ---------------- 缓存 ----------------
             root.Children.Add(Separator());
@@ -812,6 +824,8 @@ namespace WallpaperManager
             welcomeBootBox.IsChecked = c.WelcomeOnBoot;
             welcomeUnlockBox.IsChecked = c.WelcomeOnUnlock;
             filterPortraitBox.IsChecked = c.FilterPortrait;
+            pauseOnBatteryBox.IsChecked = c.PauseOnBattery;
+            batteryPctBox.Text = c.BatteryPausePercent.ToString(CultureInfo.InvariantCulture);
             proxyBox.Text = c.Proxy == null ? "" : c.Proxy;
             cacheBox.Text = c.CacheLimitMb.ToString(CultureInfo.InvariantCulture);
 
@@ -852,6 +866,15 @@ namespace WallpaperManager
             c.WelcomeOnUnlock = welcomeUnlockBox.IsChecked == true;
             c.FilterPortrait = filterPortraitBox.IsChecked == true;
             c.AutoStart = autoStartBox.IsChecked == true;
+
+            // 11-16 功耗守卫：阈值解析失败按默认 20，越界夹到 0-100
+            c.PauseOnBattery = pauseOnBatteryBox.IsChecked == true;
+            int batteryPct = 20;
+            if (!int.TryParse(batteryPctBox.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out batteryPct))
+                batteryPct = 20;
+            if (batteryPct < 0) batteryPct = 0;
+            if (batteryPct > 100) batteryPct = 100;
+            c.BatteryPausePercent = batteryPct;
 
             // 代理：空 = 直连（保持以前的行为）。填错的地址不会炸，只是请求走不通，
             // 所以这里不拦，改完点保存即可，界面上不会弹「格式不对」烦人。
