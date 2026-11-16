@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 rem ============================================================
 rem  Package: turn app\bin into a portable folder + zip
-rem  Output: dist\WallpaperManager-v0.9.6\ and .zip
+rem  Output: dist\WallpaperManager-v0.9.7\ and .zip
 rem  No admin rights, no registry writes.
 rem
 rem  11-13: paid channel goes straight to the model API (Wanx / Ark)
@@ -15,7 +15,7 @@ rem  11-15: DEFAULT channel is WorkBuddy credits (no API Key needed);
 rem  switch to "Service API Key" in Settings only for paid direct generation.
 rem ============================================================
 
-set "VER=v0.9.6"
+set "VER=v0.9.7"
 set "DST=dist\WallpaperManager-%VER%"
 
 if not exist "app\bin\WallpaperManager.exe" goto :nobuild

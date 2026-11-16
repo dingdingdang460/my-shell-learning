@@ -19,14 +19,15 @@ namespace WallpaperManager
     /// 全部依赖本机已有的 ffmpeg（主人指定：引用、不随包分发，也绝不下载）。
     /// 找不到 ffmpeg 时**明确报告「未验收」，不假装干净**，见 VerifyAndRepair 的返回值。
     ///
-    /// 判定依据（用真实库 24 个视频标定，见 docs/PROGRESS.md 第二十二节）：
+    /// 判定依据（用真实库 23 个视频标定，见 docs/PROGRESS.md 第二十二 / 二十三节）：
     /// 角标是一个圆角矩形描边，几何位置和尺寸相对帧大小固定。所以不比对模板、
-    /// 也不猜颜色，只找它唯一的结构特征 —— **上下两条等长的长横线**：
-    ///   · 逐行求「高于局部背景 T 个灰阶」的最长连续段长度；
-    ///   · 门槛 L = 0.035 × 帧宽（1344 宽 → 47px）；
-    ///   · 存在两行都 ≥ L，且行距落在 0.035H~0.070H 之间 → 认定角标。
-    /// 实测：4 个真带角标的片子全部命中（含一张对背景几乎同色的浅色角标），
-    /// 20 个干净片子（含 1080P 素材、半修补残迹）零误报。
+    /// 也不猜颜色，只找它的结构特征：
+    ///   · 逐行求「高于局部背景 T 个灰阶」的最长连续段长度，门槛 L = 0.035 × 帧宽；
+    ///   · 存在两行都 ≥ L，且行距落在 0.035H~0.070H 之间 → **完整角标**；
+    ///   · 只剩一条长横线，或长横线 + 长竖线（框被之前某次修补只盖掉一半）→ **残迹**。
+    /// 两种情况都要 delogo 重修 —— 11-16 之前只认完整角标，于是库里两张片的
+    /// 圆角框残影一直留在桌面上（主人看到的就是「去水印效果很差」）。
+    /// 只认竖线不行：真实画面里竖直的建筑边、光柱也很长（库里有 53px 的）。
     /// </summary>
     public static class Watermark
     {
@@ -40,9 +41,11 @@ namespace WallpaperManager
         const int DiffThreshold = 8;       // 高于局部背景多少灰阶算「笔画」
         const int BlurK = 15;              // 局部背景：15×15 均值
         const double LineFactor = 0.035;   // 长横线门槛 = 0.035 × 帧宽
+        const double VLineFactor = 0.025;  // 长竖线门槛 = 0.025 × 帧高（框左右两侧残留）
         const double GapLo = 0.035;        // 两行行距下限 = 0.035 × 帧高
         const double GapHi = 0.070;        // 上限
         const double MinPercent = 2.5;     // 角标区域里「笔画像素」至少占 2.5%
+        const double ResidualPercent = 1.5; // 判残迹时笔画至少占 1.5%（防全平场景的噪点）
 
         // ---------------------------------------------------------------- ffmpeg
 
@@ -253,19 +256,28 @@ namespace WallpaperManager
             public int X, Y, W, H;
             public double Percent;      // 笔画像素占比
             public int MaxRun;          // 最长的横向连续段
+            public int MaxVRun;         // 最长的纵向连续段（边框左右两边会留下这个）
             public int LineThreshold;   // 长横线门槛 L
+            public int VLineThreshold;  // 长竖线门槛
             public List<int> Lines = new List<int>();
-            public bool Pair;           // 上下两条长横线同时存在（角标的结构特征）
+            public bool Pair;           // 上下两条长横线同时存在（完整角标的结构特征）
+            public bool Residual;       // 只剩残迹：一条长横线，或长横线 + 长竖线（框被补掉一半）
 
-            public bool Found { get { return Pair && Percent >= MinPercent; } }
+            /// <summary>完整角标，或者能看出框的残迹 —— 两种都要处理。</summary>
+            public bool Found { get { return Full || Residual; } }
+
+            /// <summary>完整角标。</summary>
+            public bool Full { get { return Pair && Percent >= MinPercent; } }
+
+            public string Kind { get { return Residual ? "残迹" : "角标"; } }
 
             public string Text()
             {
-                if (Found) return "检出 AI 角标（" + X + "," + Y + " " + W + "x" + H + "，笔画 "
-                                + Percent.ToString("0.0", CultureInfo.InvariantCulture) + "%，长线 "
-                                + MaxRun + "px）";
-                return "未见 AI 角标（笔画 " + Percent.ToString("0.0", CultureInfo.InvariantCulture)
-                     + "%，长线 " + MaxRun + "px）";
+                string pct = Percent.ToString("0.0", CultureInfo.InvariantCulture);
+                if (Found) return "检出 AI " + Kind + "（" + X + "," + Y + " " + W + "x" + H
+                                 + "，笔画 " + pct + "%，长线 " + MaxRun + "px，竖线 " + MaxVRun + "px）";
+                return "未见 AI 角标（笔画 " + pct + "%，长线 " + MaxRun
+                     + "px，竖线 " + MaxVRun + "px）";
             }
         }
 
@@ -312,6 +324,22 @@ namespace WallpaperManager
             }
             b.MaxRun = best;
 
+            int Lv = (int)Math.Round(frameH * VLineFactor);
+            if (Lv < 6) Lv = 6;
+            b.VLineThreshold = Lv;
+            int bestV = 0;
+            for (int xx = 0; xx < gw; xx++)
+            {
+                int run = 0, colBest = 0;
+                for (int yy = 0; yy < gh; yy++)
+                {
+                    if (mask[yy, xx]) { run++; if (run > colBest) colBest = run; }
+                    else run = 0;
+                }
+                if (colBest > bestV) bestV = colBest;
+            }
+            b.MaxVRun = bestV;
+
             int lo = (int)Math.Round(frameH * GapLo);
             int hi = (int)Math.Round(frameH * GapHi);
             for (int i = 0; i < b.Lines.Count && !b.Pair; i++)
@@ -320,6 +348,16 @@ namespace WallpaperManager
                     int d = b.Lines[j] - b.Lines[i];
                     if (d >= lo && d <= hi) { b.Pair = true; break; }
                 }
+
+            // 残迹（11-16 补）：框被之前某次修补只盖掉一半，剩下来的可能是
+            // 「一条长横线」（上下边之一），或「长横线 + 长竖线」（右边框没盖住）。
+            // 只认竖线不行 —— 真实画面里竖直的建筑边、光柱也很长（库里有 53px 的），
+            // 所以必须同时有够长的横线才算残迹。判定标准同样用 23 个真实样本标过：
+            // 两张残迹（72px / 33px+32px）都抓到，21 个干净片子零误报。
+            bool longH = b.MaxRun >= L;
+            bool longV = bestV >= Lv;
+            b.Residual = !b.Pair && b.Percent >= ResidualPercent
+                         && (longH || (longV && b.MaxRun >= L * 0.5));
             return b;
         }
 
@@ -372,6 +410,36 @@ namespace WallpaperManager
             if (g == null) return null;
             return Analyze(fw, fh, g);
         }
+
+        /// <summary>
+        /// 抽三帧分别判（1.0 / 0.4 / 2.2 秒）。任一帧有角标或残迹就返回那一帧的结果 ——
+        /// 只抽一帧的话，万一正好抽到闪光、转场、镜头发白的那一帧就会整套漏过，
+        /// 片子带着角标进库。三帧在 26 个真实样本上判定完全一致，不引入误报。
+        /// 三帧都干净返回第一帧的结果；全读不出来返回 null。
+        /// </summary>
+        public static Badge MeasureBest(string mp4, out string err)
+        {
+            err = "";
+            Badge first = null;
+            string firstErr = "";
+            for (int i = 0; i < ScanTimes.Length; i++)
+            {
+                string e;
+                Badge b = Measure(mp4, ScanTimes[i], out e);
+                if (b == null)
+                {
+                    if (i == 0) firstErr = e;
+                    continue;
+                }
+                if (b.Found) return b;
+                if (first == null) first = b;
+            }
+            if (first == null) { err = firstErr.Length > 0 ? firstErr : "读不出画面"; return null; }
+            return first;
+        }
+
+        /// <summary>验收时扫的时间点（秒）。</summary>
+        public static readonly double[] ScanTimes = new double[] { 1.0, 0.4, 2.2 };
 
         static double[,] GrabGray(string mp4, double atSec, int x, int y, int w, int h, out string err)
         {
@@ -438,7 +506,7 @@ namespace WallpaperManager
             }
 
             string err;
-            Badge before = Measure(mp4, 1.0, out err);
+            Badge before = MeasureBest(mp4, out err);
             if (before == null)
             {
                 r.Checked = false;
@@ -473,25 +541,41 @@ namespace WallpaperManager
                     return r;
                 }
 
-                Badge after = Measure(tmp, 1.0, out err);
+                // 复查也必须多帧：单帧干净不等于整段干净（转场 / 镜头切换后角标位置可能变）
+                Badge after = null;
+                string residue = "";
+                for (int i = 0; i < ScanTimes.Length; i++)
+                {
+                    string ee;
+                    Badge bb = Measure(tmp, ScanTimes[i], out ee);
+                    if (bb == null) { residue = "第 " + ScanTimes[i] + " 秒读不出画面"; after = null; break; }
+                    if (bb.Found) { residue = "第 " + ScanTimes[i] + " 秒仍有痕迹（" + bb.Text() + "）"; after = bb; break; }
+                    if (after == null) after = bb;
+                }
                 r.After = after;
-                if (after == null || after.Found)
+                if (after == null || residue.Length > 0)
                 {
                     r.Clean = false;
-                    r.Msg = before.Text() + "；修补后仍有痕迹（"
-                          + (after == null ? "读不出画面" : after.Text()) + "），不入库";
+                    r.Msg = before.Text() + "；修补后" + (residue.Length > 0 ? residue : "读不出画面") + "，不入库";
                     return r;
                 }
 
+                // 备份**绝不覆盖已有的那份**：一张片子可能被修过不止一次（先补掉角标、
+                // 后来发现右边框没盖住再补一次）。如果每次都把 .bak-wm 换成本次的输入，
+                // 真正的原始素材就永久没了 —— 11-16 上午正是这么丢掉一次。
                 string bak = mp4 + ".bak-wm";
-                try { if (File.Exists(bak)) File.Delete(bak); } catch { }
+                for (int n = 2; File.Exists(bak); n++)
+                {
+                    bak = mp4 + ".bak-wm" + n.ToString(CultureInfo.InvariantCulture);
+                    if (n > 20) break;      // 兜底，别无限循环
+                }
                 File.Move(mp4, bak);
                 File.Move(tmp, mp4);
                 r.Clean = true;
                 r.Repaired = true;
                 r.Msg = before.Text() + " → 已 delogo 修补，复查干净（"
                       + after.Percent.ToString("0.0", CultureInfo.InvariantCulture)
-                      + "%，原片备份 .bak-wm）";
+                      + "%，原片备份 " + Path.GetFileName(bak) + "）";
                 return r;
             }
             catch (Exception ex)

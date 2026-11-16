@@ -2212,6 +2212,39 @@ namespace WallpaperManager
             return a;
         }
 
+        /// <summary>造「右边框没盖住」的残迹：一条长横线 + 一条长竖线。</summary>
+        static double[,] SynthRemnant(int w, int h)
+        {
+            double[,] a = new double[h, w];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    a[y, x] = 110 + 50.0 * x / w;
+            int xr = 78;
+            for (int y = 14; y <= 43 && y < h; y++)
+            {
+                a[y, xr] = 235;
+                if (xr + 1 < w) a[y, xr + 1] = 235;
+            }
+            for (int x = 4; x < 80 && x < w; x++) { a[41, x] = 235; if (42 < h) a[42, x] = 235; }
+            return a;
+        }
+
+        /// <summary>造一条很长的竖直边（模拟建筑边 / 光柱），没有任何横线。</summary>
+        static double[,] SynthVerticalOnly(int w, int h)
+        {
+            double[,] a = new double[h, w];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    a[y, x] = 110 + 50.0 * x / w;
+            int xr = 60;
+            for (int y = 2; y < h - 2; y++)
+            {
+                a[y, xr] = 235;
+                if (xr + 1 < w) a[y, xr + 1] = 235;
+            }
+            return a;
+        }
+
         /// <summary>
         /// --watermarktest：角标验收能力。
         /// 一二节是纯函数断言（不碰 ffmpeg、不读任何真实文件）；
@@ -2242,18 +2275,39 @@ namespace WallpaperManager
             // ---- 二、判定逻辑：纯函数，合成图直接断言 ----
             Watermark.Badge bd = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 4, 41, 80));
             Hit(sb, ref pass, ref total, "合成角标（上下两条长横线）→ 检出", bd.Found, bd.Text());
+            Hit(sb, ref pass, ref total, "完整角标判成「角标」而不是「残迹」",
+                bd.Full && bd.Kind == "角标", "Full=" + bd.Full + " Kind=" + bd.Kind);
 
             Watermark.Badge cl = Watermark.Analyze(1344, 768, SynthCorner(90, 46, -1, -1, 0));
             Hit(sb, ref pass, ref total, "只有渐变背景 → 不检出", !cl.Found, cl.Text());
 
+            // 11-16 修正：只有一条长横线，以前判「不是角标 → 放过」，结果库里两张
+            // 片子的圆角框残影一直留在桌面上（主人看到的「去水印很差」就是它）。
+            // 现在必须判成「残迹」并交给 delogo 再修一遍。
             Watermark.Badge one = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 4, -1, 80));
-            Hit(sb, ref pass, ref total, "只有一条横线（半修补残迹）→ 不误判成角标", !one.Found, one.Text());
+            Hit(sb, ref pass, ref total, "只剩一条长横线（半修补残迹）→ 检出为残迹", one.Found, one.Text());
+            Hit(sb, ref pass, ref total, "只剩一条长横线时判成「残迹」", one.Kind == "残迹", one.Kind);
 
             Watermark.Badge near = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 14, 24, 80));
-            Hit(sb, ref pass, ref total, "两条横线行距太近（10px）→ 不检出", !near.Found, near.Text());
+            Hit(sb, ref pass, ref total, "两条横线行距太近（10px）→ 不算完整角标", !near.Full, near.Text());
+            Hit(sb, ref pass, ref total, "行距太近但横线够长 → 仍按残迹修", near.Found, near.Text());
 
+            // 28px 的横线本身不到门槛，但它带着 39px 的竖边，整体是个小方框 ——
+            // 在角标该在的位置出现这种东西，宁可当残迹修掉（有 .bak-wm 可回退），
+            // 也不要留个残影在桌面上。库里的干净片子横线最长 36px 且没有配对的竖边，
+            // 真实场景不会踩到这条。
             Watermark.Badge shrt = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 4, 41, 28));
-            Hit(sb, ref pass, ref total, "两条横线太短（28px < 门槛）→ 不检出", !shrt.Found, shrt.Text());
+            Hit(sb, ref pass, ref total, "小方框（横线 28px）→ 不当成完整角标", !shrt.Full, shrt.Text());
+            Hit(sb, ref pass, ref total, "小方框 → 按残迹处理（有备份可回退）", shrt.Found, shrt.Text());
+
+            // 「右边框没盖住」那种残迹：一条长横线 + 一条长竖线
+            Watermark.Badge rem = Watermark.Analyze(1344, 768, SynthRemnant(90, 46));
+            Hit(sb, ref pass, ref total, "长横线 + 长竖线（右边框残留）→ 检出为残迹", rem.Found, rem.Text());
+
+            // 真实画面里的竖直边（建筑、光柱，库里有 53px 的）不能被当成残迹：
+            // 单看竖线会误伤，必须同时有够长的横线。
+            Watermark.Badge vo = Watermark.Analyze(1344, 768, SynthVerticalOnly(90, 46));
+            Hit(sb, ref pass, ref total, "只有一条长竖线（建筑边/光柱）→ 不误判成残迹", !vo.Found, vo.Text());
 
             // ---- 三、ffmpeg 发现 ----
             string why;

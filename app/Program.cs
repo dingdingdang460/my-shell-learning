@@ -184,7 +184,10 @@ namespace WallpaperManager
                 string t = s.ToLowerInvariant();
                 if (t.EndsWith("test", StringComparison.Ordinal)
                     || t.StartsWith("--probe", StringComparison.Ordinal)
-                    || t.StartsWith("--genapicheck", StringComparison.Ordinal)) return true;
+                    || t.StartsWith("--genapicheck", StringComparison.Ordinal)
+                    // --fixlogo 不是自检，但它是一次性批处理动作：不该接管桌面
+                    // （更不该先把正在播放的片子拉起来 —— 那正好会把要改的文件锁住）。
+                    || t.StartsWith("--fixlogo", StringComparison.Ordinal)) return true;
             }
             return false;
         }
@@ -913,6 +916,26 @@ namespace WallpaperManager
                         Log.Note("自检 --guardtest：\r\n" + detail);
                         Log.Note("自检 --guardtest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--fixlogo", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 无界面地把库里检出「AI角标 / 修补残迹」的片子逐个修掉（保留备份）。
+                    // 与托盘「检查水印」同一套 Watermark.VerifyAndRepair，只是不问话；
+                    // 加 --dry 只列清单不改文件。改完自动退出，方便脚本串联。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(1.5);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        try { RunFixLogo(); }
+                        catch (Exception ex) { Log.Note("--fixlogo 异常：" + ex.GetType().Name + "：" + ex.Message); }
+                        DispatcherTimer bye = new DispatcherTimer();
+                        bye.Interval = TimeSpan.FromSeconds(1.5);
+                        bye.Tick += delegate { bye.Stop(); Application.Current.Shutdown(); };
+                        bye.Start();
                     };
                     auto.Start();
                     break;
@@ -1862,6 +1885,93 @@ namespace WallpaperManager
         }
 
         /// <summary>
+        /// 修补库文件前先把「正在播放的那一张」放掉：播放器一直占着 mp4，
+        /// 改名会失败（sharing violation），修补会白白失败。
+        /// 返回被停掉的 id，修完交给 RestoreAfterRepair。
+        /// </summary>
+        string ReleasePlayingForRepair()
+        {
+            if (!Dynamic.Alive) return null;
+            string id = Config.LastDynamicId;
+            try { StopPlayback(); } catch { }
+            MarkStopped();
+            if (!string.IsNullOrEmpty(id)) Log.Note("修补角标：先停掉正在播放的 " + id);
+            return id;
+        }
+
+        void RestoreAfterRepair(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            for (int i = 0; i < Items.Count; i++)
+            {
+                if (Items[i].Id != id) continue;
+                Log.Note("修补角标：恢复播放 " + id);
+                ApplyItem(Items[i]);
+                return;
+            }
+        }
+
+        /// <summary>
+        /// --fixlogo：把库里检出角标/残迹的片子逐个修掉，不打对话框。
+        /// 和托盘「检查水印」用的是同一个 Watermark.VerifyAndRepair，
+        /// 区别只是这里不问话（供命令行 / 批处理用）。--dry 只列清单。
+        /// </summary>
+        public void RunFixLogo()
+        {
+            bool dry = false;
+            string[] argv = Environment.GetCommandLineArgs();
+            for (int i = 1; i < argv.Length; i++)
+                if (string.Equals(argv[i], "--dry", StringComparison.OrdinalIgnoreCase)) dry = true;
+
+            string why;
+            if (!Watermark.Available(out why))
+            {
+                Log.Note("--fixlogo 没法跑：没找到 ffmpeg（" + why + "）");
+                return;
+            }
+            string vdir = Path.Combine(Config.LibRoot, "videos");
+            string[] files;
+            try { files = Directory.GetFiles(vdir, "*.mp4"); }
+            catch (Exception ex) { Log.Note("--fixlogo 读不了 " + vdir + "：" + ex.Message); return; }
+            Array.Sort(files);
+            Log.Note("--fixlogo 开始：" + vdir + "（" + files.Length + " 个文件" + (dry ? "，只查不改" : "") + "）");
+
+            StringBuilder sb = new StringBuilder();
+            int scanned = 0, found = 0, fixedOk = 0, notClean = 0, bad = 0;
+            string playing = null;
+            for (int i = 0; i < files.Length; i++)
+            {
+                string f = files[i];
+                if (Path.GetFileName(f).IndexOf(".bak", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                string err;
+                Watermark.Badge b;
+                try { b = Watermark.MeasureBest(f, out err); }
+                catch (Exception ex) { b = null; err = ex.Message; }
+                scanned++;
+                if (b == null)
+                {
+                    bad++;
+                    sb.Append("? ").Append(Path.GetFileName(f)).Append("：读不出来（").Append(err).Append("）\r\n");
+                    continue;
+                }
+                if (!b.Found) continue;
+                found++;
+                sb.Append("· ").Append(Path.GetFileName(f)).Append("　").Append(b.Text()).Append("\r\n");
+                if (dry) continue;
+                if (playing == null) playing = ReleasePlayingForRepair();
+                Watermark.Outcome o = Watermark.VerifyAndRepair(f);
+                if (o.Clean && o.Repaired) fixedOk++;
+                else { notClean++; sb.Append("  !! ").Append(o.Msg).Append("\r\n"); }
+            }
+            RestoreAfterRepair(playing);
+
+            Log.Note("--fixlogo 明细：\r\n" + sb.ToString());
+            Log.Note("--fixlogo 结束：扫描 " + scanned + " / 检出 " + found + " / 修好 " + fixedOk
+                     + " / 没修干净 " + notClean + " / 读不出 " + bad
+                     + (dry ? "（只查不改）" : ""));
+        }
+
+        /// <summary>
         /// 托盘「检查水印」：扫全库视频，列出带角标的，问一句再动手。
         /// 与出片后的自动验收是两码事 —— 这里动的是**已有**的库文件，
         /// 所以必须先列清单、等主人点头，绝不静默改。
@@ -1901,7 +2011,7 @@ namespace WallpaperManager
                     try
                     {
                         string err;
-                        Watermark.Badge b = Watermark.Measure(f, 1.0, out err);
+                        Watermark.Badge b = Watermark.MeasureBest(f, out err);
                         if (b == null)
                         {
                             Log.Note("检查水印：跳过 " + Path.GetFileName(f) + "（" + err + "）");
@@ -1922,7 +2032,7 @@ namespace WallpaperManager
                 if (bad.Count == 0)
                 {
                     SetStatusSafe("检查完了：库里没发现 AI 角标");
-                    string msg0 = "扫了 " + files.Length + " 个视频，没发现「AI生成」角标。";
+                    string msg0 = "扫了 " + files.Length + " 个视频，没发现「AI生成」角标或修补残影。";
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
                         MessageBox.Show(msg0, "检查水印", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1931,11 +2041,12 @@ namespace WallpaperManager
                 }
 
                 StringBuilder sb = new StringBuilder();
-                sb.Append("发现 ").Append(bad.Count).Append(" 个视频带「AI生成」角标：\r\n\r\n");
+                sb.Append("发现 ").Append(bad.Count).Append(" 个视频带 AI 角标或修补残影：\r\n\r\n");
                 for (int i = 0; i < names.Count && i < 12; i++) sb.Append("· ").Append(names[i]).Append("\r\n");
                 if (names.Count > 12) sb.Append("…… 另有 ").Append(names.Count - 12).Append(" 个\r\n");
                 sb.Append("\r\n现在就修补吗？会重新编码这些片子（画质按 CRF 18，肉眼看不出差别，体积约涨三成），")
-                  .Append("原文件留 .bak-wm 备份。修补后复查不干净的会保留 .bak-wm 原样不动。");
+                  .Append("原文件留 .bak-wm 备份（已有的备份不会被覆盖，会另存 .bak-wm2）。")
+                  .Append("修补后复查不干净的原样保留，不会动。");
                 // 问话必须回到 UI 线程，而且要在这里等答案（后面的活儿依赖「修不修」）
                 string ask = sb.ToString();
                 MessageBoxResult r = MessageBoxResult.No;
@@ -1949,14 +2060,18 @@ namespace WallpaperManager
                     return;
                 }
 
+                // 正在播放的那张被播放器占着，改名会失败 —— 先放掉，修完再恢复。
+                string playing = null;
                 int ok = 0, fail = 0;
                 for (int i = 0; i < bad.Count; i++)
                 {
                     SetStatusSafe("修补角标 " + (i + 1) + "/" + bad.Count + "：" + Path.GetFileName(bad[i]));
+                    if (playing == null) playing = ReleasePlayingForRepair();
                     Watermark.Outcome o = Watermark.VerifyAndRepair(bad[i]);
                     Log.Note((o.Clean ? "补角标 √ " : "补角标 !! ") + Path.GetFileName(bad[i]) + "：" + o.Msg);
                     if (o.Clean) ok++; else fail++;
                 }
+                RestoreAfterRepair(playing);
                 SetStatusSafe("角标修补完成：干净 " + ok + " 个，未干净 " + fail + " 个（详见日志）");
                 string done = "修补完成：\r\n干净 " + ok + " 个\r\n未干净 " + fail + " 个\r\n\r\n"
                     + "原文件都已备份成 .bak-wm。未干净的片子没有改动，可以稍后重试或重新生成。";
