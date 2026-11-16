@@ -2132,6 +2132,8 @@ namespace WallpaperManager
                 AppConfig t = new AppConfig();
                 t.PauseOnBattery = false;
                 t.BatteryPausePercent = 35;
+                t.FfmpegPath = @"C:\tools\ffmpeg.exe";
+                t.AutoDelogo = false;
                 bool wrote = ConfigStore.WriteTo(t, tmp);
                 AppConfig back = wrote ? ConfigStore.LoadFrom(tmp) : null;
                 round = wrote && back != null
@@ -2142,6 +2144,25 @@ namespace WallpaperManager
             catch (Exception ex) { sb.Append("  （配置往返异常：").Append(ex.Message).Append("）\r\n"); }
             Hit(sb, ref pass, ref total, "pauseOnBattery / batteryPausePercent 落盘往返", round, "");
 
+            // 11-16：角标验收的两个键也得真的存得下、读得回
+            string tmp2 = Path.Combine(Path.GetTempPath(), "wb-guardtest-wmcfg.json");
+            bool round2 = false;
+            try
+            {
+                AppConfig t = new AppConfig();
+                t.FfmpegPath = @"C:\tools\ffmpeg.exe";
+                t.AutoDelogo = false;
+                bool wrote = ConfigStore.WriteTo(t, tmp2);
+                AppConfig back = wrote ? ConfigStore.LoadFrom(tmp2) : null;
+                round2 = wrote && back != null
+                      && back.FfmpegPath == @"C:\tools\ffmpeg.exe"
+                      && back.AutoDelogo == false
+                      && back.FfmpegPath.Length > 0;
+                if (File.Exists(tmp2)) File.Delete(tmp2);
+            }
+            catch (Exception ex) { sb.Append("  （角标配置往返异常：").Append(ex.Message).Append("）\r\n"); }
+            Hit(sb, ref pass, ref total, "ffmpegPath / autoDelogo 落盘往返", round2, "");
+
             // ---- 六、老配置缺键时回填默认值（守卫开、20%）----
             string legacyFile = Path.Combine(Path.GetTempPath(), "wb-guardtest-old.json");
             bool legacy = false;
@@ -2151,13 +2172,188 @@ namespace WallpaperManager
                     "{\r\n  \"libRoot\": \"D:\\\\Wallpaper\",\r\n  \"intervalMinutes\": 180\r\n}",
                     new UTF8Encoding(false));
                 AppConfig back = ConfigStore.LoadFrom(legacyFile);
-                legacy = back.PauseOnBattery == true && back.BatteryPausePercent == 20;
+                legacy = back.PauseOnBattery == true && back.BatteryPausePercent == 20
+                      && back.AutoDelogo == true && (back.FfmpegPath == null || back.FfmpegPath.Length == 0);
                 if (File.Exists(legacyFile)) File.Delete(legacyFile);
             }
             catch (Exception ex) { sb.Append("  （老配置回填异常：").Append(ex.Message).Append("）\r\n"); }
-            Hit(sb, ref pass, ref total, "老配置没有功耗键 → 默认 开 / 20%", legacy, "");
+            Hit(sb, ref pass, ref total, "老配置没有这些键 → 守卫 开/20%、角标验收 开、ffmpeg 自动找", legacy, "");
 
             return Finish(sb, pass, total);
+        }
+
+        // ================================================================ 角标验收（11-16）
+
+        /// <summary>
+        /// 合成一张灰度小图：渐变背景 + 可选的「上下两条长横线」（角标的唯一结构特征）。
+        /// 只在内存里造，不写盘 —— 判定逻辑必须是纯函数才能这样验。
+        /// </summary>
+        static double[,] SynthCorner(int w, int h, int topRow, int botRow, int lineLen)
+        {
+            double[,] a = new double[h, w];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    a[y, x] = 110 + 50.0 * x / w;      // 左暗右亮的渐变，模拟真实画面
+            if (lineLen > 0)
+            {
+                int x0 = 4, x1 = x0 + lineLen; if (x1 > w - 1) x1 = w - 1;
+                if (topRow >= 0 && topRow < h)
+                    for (int x = x0; x < x1; x++) { a[topRow, x] = 235; if (topRow + 1 < h) a[topRow + 1, x] = 235; }
+                if (botRow >= 0 && botRow < h)
+                    for (int x = x0; x < x1; x++) { a[botRow, x] = 235; if (botRow + 1 < h) a[botRow + 1, x] = 235; }
+                // 左右两条竖线把描边闭合成方框（对「长横线」判定无贡献，只为贴近真实）
+                if (topRow >= 0 && botRow > topRow)
+                    for (int y = topRow; y <= botRow && y < h; y++)
+                    {
+                        a[y, x0] = 235; if (x0 + 1 < w) a[y, x0 + 1] = 235;
+                        int xr = x1 - 1; if (xr > 0 && xr < w) a[y, xr] = 235;
+                    }
+            }
+            return a;
+        }
+
+        /// <summary>
+        /// --watermarktest：角标验收能力。
+        /// 一二节是纯函数断言（不碰 ffmpeg、不读任何真实文件）；
+        /// 第四节用 ffmpeg 现场造片子跑完整链路，全程只在 TEMP（自检时已指向仓库内）里。
+        /// </summary>
+        public static string WatermarkTest(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+
+            // ---- 一、检测框几何：必须盖住真实角标 ----
+            int x, y, w, h;
+            Watermark.Rect(1344, 768, out x, out y, out w, out h);
+            Hit(sb, ref pass, ref total, "1344x768 的框盖住实测角标（x10..91 / y10..47）",
+                x <= 10 && y <= 10 && x + w >= 91 && y + h >= 47,
+                x + "," + y + " " + w + "x" + h);
+
+            Watermark.Rect(1920, 1080, out x, out y, out w, out h);
+            Hit(sb, ref pass, ref total, "1920x1080 的框按比例放大",
+                x <= 14 && y <= 14 && x + w >= 130 && y + h >= 66,
+                x + "," + y + " " + w + "x" + h);
+
+            Watermark.Rect(320, 180, out x, out y, out w, out h);
+            Hit(sb, ref pass, ref total, "超小画面不越界（x,y≥2 且整框在画面内）",
+                x >= 2 && y >= 2 && x + w <= 318 && y + h <= 178,
+                x + "," + y + " " + w + "x" + h);
+
+            // ---- 二、判定逻辑：纯函数，合成图直接断言 ----
+            Watermark.Badge bd = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 4, 41, 80));
+            Hit(sb, ref pass, ref total, "合成角标（上下两条长横线）→ 检出", bd.Found, bd.Text());
+
+            Watermark.Badge cl = Watermark.Analyze(1344, 768, SynthCorner(90, 46, -1, -1, 0));
+            Hit(sb, ref pass, ref total, "只有渐变背景 → 不检出", !cl.Found, cl.Text());
+
+            Watermark.Badge one = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 4, -1, 80));
+            Hit(sb, ref pass, ref total, "只有一条横线（半修补残迹）→ 不误判成角标", !one.Found, one.Text());
+
+            Watermark.Badge near = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 14, 24, 80));
+            Hit(sb, ref pass, ref total, "两条横线行距太近（10px）→ 不检出", !near.Found, near.Text());
+
+            Watermark.Badge shrt = Watermark.Analyze(1344, 768, SynthCorner(90, 46, 4, 41, 28));
+            Hit(sb, ref pass, ref total, "两条横线太短（28px < 门槛）→ 不检出", !shrt.Found, shrt.Text());
+
+            // ---- 三、ffmpeg 发现 ----
+            string why;
+            string ff = Watermark.Resolve(out why);
+            Hit(sb, ref pass, ref total, "本机找到可用的 ffmpeg", ff != null,
+                ff != null ? ff : why);
+
+            Watermark.CustomPath = @"Z:\不存在的\ffmpeg.exe";
+            Watermark.ResetFfmpegCache();
+            string why2;
+            string ff2 = Watermark.Resolve(out why2);
+            Hit(sb, ref pass, ref total, "手填路径无效时仍能自动发现（不硬失败）",
+                (ff == null && ff2 == null) || ff2 != null,
+                ff2 != null ? "退回到 " + ff2 : why2);
+            Watermark.CustomPath = app == null || app.Config == null ? "" : (app.Config.FfmpegPath ?? "");
+            Watermark.ResetFfmpegCache();
+
+            // ---- 四、端到端：造片 → 检测 → delogo → 复查 ----
+            if (ff == null)
+            {
+                sb.Append("　（没 ffmpeg，跳过端到端链路）\r\n");
+                return Finish(sb, pass, total);
+            }
+
+            string dir = Path.Combine(Path.GetTempPath(), "wb-wmtest-" + Environment.TickCount);
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string badMp4 = Path.Combine(dir, "bad.mp4");
+                string okMp4 = Path.Combine(dir, "ok.mp4");
+
+                // 3 秒 1344×768 纯色片 + 按实测坐标画一个「AI生成」样子的方框描边
+                string src = "-hide_banner -loglevel error -y -f lavfi -i color=c=0x2A3550:s=1344x768:d=3:r=24";
+                string box = "drawbox=x=10:y=10:w=82:h=38:color=white@0.95:t=2";
+                RunFfmpeg(ff, src + " -vf \"" + box + "\" -c:v libx264 -crf 20 -pix_fmt yuv420p \"" + badMp4 + "\"");
+                RunFfmpeg(ff, src + " -c:v libx264 -crf 20 -pix_fmt yuv420p \"" + okMp4 + "\"");
+
+                bool made = File.Exists(badMp4) && File.Exists(okMp4)
+                            && new FileInfo(badMp4).Length > 1000 && new FileInfo(okMp4).Length > 1000;
+                Hit(sb, ref pass, ref total, "ffmpeg 造出测试片（带角标 / 干净各一）", made,
+                    made ? (new FileInfo(badMp4).Length + " / " + new FileInfo(okMp4).Length + " 字节") : "造片失败");
+
+                if (made)
+                {
+                    string err;
+                    Watermark.Badge before = Watermark.Measure(badMp4, 1.0, out err);
+                    Hit(sb, ref pass, ref total, "带角标的片子 → 抽帧检出",
+                        before != null && before.Found, before == null ? err : before.Text());
+
+                    Watermark.Outcome o = Watermark.VerifyAndRepair(badMp4);
+                    Hit(sb, ref pass, ref total, "检出后 delogo 修补成功",
+                        o.Checked && o.Clean && o.Repaired, o.Msg);
+
+                    Watermark.Badge after = Watermark.Measure(badMp4, 1.0, out err);
+                    Hit(sb, ref pass, ref total, "修补后复查：角标没了",
+                        after != null && !after.Found, after == null ? err : after.Text());
+
+                    Hit(sb, ref pass, ref total, "原片留了 .bak-wm 备份",
+                        File.Exists(badMp4 + ".bak-wm") && new FileInfo(badMp4 + ".bak-wm").Length > 1000, "");
+
+                    Watermark.Outcome again = Watermark.VerifyAndRepair(badMp4);
+                    Hit(sb, ref pass, ref total, "再跑一次：判为干净且不再重编码（幂等）",
+                        again.Checked && again.Clean && !again.Repaired, again.Msg);
+
+                    long sizeBefore = new FileInfo(okMp4).Length;
+                    DateTime mtimeBefore = File.GetLastWriteTimeUtc(okMp4);
+                    Watermark.Outcome oc = Watermark.VerifyAndRepair(okMp4);
+                    bool untouched = new FileInfo(okMp4).Length == sizeBefore
+                                     && File.GetLastWriteTimeUtc(okMp4) == mtimeBefore
+                                     && !File.Exists(okMp4 + ".bak-wm");
+                    Hit(sb, ref pass, ref total, "干净片子：判为干净且一个字节都没动",
+                        oc.Checked && oc.Clean && !oc.Repaired && untouched, oc.Msg);
+
+                    Watermark.Outcome on = Watermark.VerifyAndRepair(Path.Combine(dir, "没有这个文件.mp4"));
+                    Hit(sb, ref pass, ref total, "文件不存在 → 明确报「没验收」而不是「干净」",
+                        !on.Checked && !on.Clean, on.Msg);
+                }
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "端到端链路没有抛异常", false, ex.GetType().Name + "：" + ex.Message);
+            }
+            finally { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
+
+            return Finish(sb, pass, total);
+        }
+
+        /// <summary>自检里直接起 ffmpeg 造素材，不经过 Watermark 内部（避免自己验自己）。</summary>
+        static void RunFfmpeg(string exe, string args)
+        {
+            try
+            {
+                System.Diagnostics.ProcessStartInfo psi =
+                    new System.Diagnostics.ProcessStartInfo(exe, args);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi);
+                if (!p.WaitForExit(120000)) { try { p.Kill(); } catch { } }
+            }
+            catch { }
         }
 
         static WallpaperItem ItemById(List<WallpaperItem> list, string id)

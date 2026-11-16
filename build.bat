@@ -21,7 +21,7 @@ if not exist "%FW%\WPF\PresentationFramework.dll" goto :nowpf
 if not exist "app\bin" mkdir "app\bin"
 
 set "SRC="
-for %%f in (Program Models Json Desk WallpaperFit LibraryStore Greeting TagNames Online Bili Translate Log Settings Dynamic CloudGen BuddyBridge RelatedVideo VideoFingerprint MfVideo GenApi GenModels MockCloud MockProxy SelfTestExtra Http Pinyin ColorTag WelcomeGen MainWindow PowerGuard Recycle) do set "SRC=!SRC! app\%%f.cs"
+for %%f in (Program Models Json Desk WallpaperFit LibraryStore Greeting TagNames Online Bili Translate Log Settings Dynamic CloudGen BuddyBridge RelatedVideo VideoFingerprint MfVideo GenApi GenModels MockCloud MockProxy SelfTestExtra Http Pinyin ColorTag WelcomeGen MainWindow PowerGuard Recycle Watermark) do set "SRC=!SRC! app\%%f.cs"
 
 set "NEWEXE=app\bin\WallpaperManager.new.exe"
 if exist "%NEWEXE%" del /f /q "%NEWEXE%" >nul 2>&1

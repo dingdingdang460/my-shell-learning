@@ -74,5 +74,12 @@ namespace WallpaperManager
         // 老配置没有这两个键时：守卫默认开、阈值默认 20%。
         public bool PauseOnBattery = true;
         public int BatteryPausePercent = 20;
+
+        // ---- 角标验收（11-16）----
+        // 出片后抽帧检查左上角「AI生成」合规角标，检测到就 delogo 修补，修干净才入库。
+        // 依赖本机 ffmpeg（引用不外带）。FfmpegPath 留空 = 自动发现（程序目录 / PATH /
+        // WorkBuddy 自带 Python 的 imageio-ffmpeg），便携环境或装了别的版本时可手填。
+        public string FfmpegPath = "";
+        public bool AutoDelogo = true;
     }
 }

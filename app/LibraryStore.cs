@@ -602,6 +602,11 @@ namespace WallpaperManager
                 c.PauseOnBattery = Json.Bool(d, "pauseOnBattery", true);
                 long bpp = Json.Long(d, "batteryPausePercent");
                 if (bpp > 0 && bpp <= 100) c.BatteryPausePercent = (int)bpp;
+
+                // 11-16 角标验收：老配置缺键 → 自动修补默认开（主人拍板的硬规则是
+                // 「有角标必须修干净才交付」，默认开才对；不想让程序动片子可以在设置里关）。
+                c.FfmpegPath = Json.Str(d, "ffmpegPath");
+                c.AutoDelogo = Json.Bool(d, "autoDelogo", true);
             }
             catch { }
             return c;
@@ -643,7 +648,9 @@ namespace WallpaperManager
                 sb.Append("  \"proxy\": ").Append(Json.Quote(c.Proxy)).Append(",\r\n");
                 sb.Append("  \"cacheLimitMb\": ").Append(c.CacheLimitMb).Append(",\r\n");
                 sb.Append("  \"pauseOnBattery\": ").Append(c.PauseOnBattery ? "true" : "false").Append(",\r\n");
-                sb.Append("  \"batteryPausePercent\": ").Append(c.BatteryPausePercent).Append("\r\n");
+                sb.Append("  \"batteryPausePercent\": ").Append(c.BatteryPausePercent).Append(",\r\n");
+                sb.Append("  \"ffmpegPath\": ").Append(Json.Quote(c.FfmpegPath)).Append(",\r\n");
+                sb.Append("  \"autoDelogo\": ").Append(c.AutoDelogo ? "true" : "false").Append("\r\n");
                 sb.Append("}\r\n");
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
                 return true;

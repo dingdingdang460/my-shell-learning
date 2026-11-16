@@ -169,6 +169,10 @@ namespace WallpaperManager
         /// 以前每个自检进程一启动就 RestoreDynamic 拉起播放器：既把自检和用户桌面
         /// 绑在一起，残留进程还会让下一项 --launchtest 误报「开播前有残留播放器」。
         /// --dynvideo / --stopdynamic 这类真实入口不受影响。
+        ///
+        /// 11-16：`--genapicheck` 名字不以 test 结尾，以前漏在闸门外 —— 它跑起来会
+        /// 照常恢复动态壁纸、顺手把真实库 index.json 的 mtime 改写掉（内容没变，但
+        /// 这就是「自检碰了工作空间外的文件」）。现在一并收进闸门。
         /// </summary>
         static bool SelfTestArgs()
         {
@@ -179,7 +183,8 @@ namespace WallpaperManager
                 if (!s.StartsWith("--", StringComparison.Ordinal)) continue;
                 string t = s.ToLowerInvariant();
                 if (t.EndsWith("test", StringComparison.Ordinal)
-                    || t.StartsWith("--probe", StringComparison.Ordinal)) return true;
+                    || t.StartsWith("--probe", StringComparison.Ordinal)
+                    || t.StartsWith("--genapicheck", StringComparison.Ordinal)) return true;
             }
             return false;
         }
@@ -211,6 +216,9 @@ namespace WallpaperManager
             if (trimmed > 0) Log.Note("启动清理合成图缓存 " + trimmed + " 张（上限 " + Config.CacheLimitMb + "MB）");
 
             ReloadLibrary();
+
+            // 角标验收用的 ffmpeg：配置里的手填路径优先，空则自动发现（见 Watermark.Resolve）
+            SyncWatermarkFfmpeg();
 
             win = new MainWindow(this);
             this.MainWindow = win;
@@ -904,6 +912,28 @@ namespace WallpaperManager
                         }
                         Log.Note("自检 --guardtest：\r\n" + detail);
                         Log.Note("自检 --guardtest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
+                if (string.Equals(s, "--watermarktest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-16：AI 角标验收。合成图断言判定逻辑，再用 ffmpeg 现场造一段
+                    // 带角标的短片跑完整「检测 → delogo → 复查」链路，全程只在 TEMP 里。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.WatermarkTest(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --watermarktest：\r\n" + detail);
+                        Log.Note("自检 --watermarktest："
                                  + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
                     };
                     auto.Start();
@@ -1703,6 +1733,11 @@ namespace WallpaperManager
             Forms.ToolStripMenuItem miLog = new Forms.ToolStripMenuItem("打开日志");
             miLog.Click += delegate { OpenLog(); };
 
+            // 11-16：库里的历史片子可能带平台「AI生成」角标，给一个显式的检查入口。
+            // 只扫不改，列出清单等主人点头才动手。
+            Forms.ToolStripMenuItem miWm = new Forms.ToolStripMenuItem("检查水印（AI 角标）");
+            miWm.Click += delegate { CheckWatermarks(); };
+
             Forms.ToolStripMenuItem miExit = new Forms.ToolStripMenuItem("退出");
             miExit.Click += delegate { Log.Note("托盘：退出"); ExitApp(); };
 
@@ -1734,6 +1769,7 @@ namespace WallpaperManager
             menu.Items.Add(miGreet);
             menu.Items.Add(miSettings);
             menu.Items.Add(miLog);
+            menu.Items.Add(miWm);
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add(miExit);
             tray.ContextMenuStrip = menu;
@@ -1774,6 +1810,162 @@ namespace WallpaperManager
             {
                 if (win != null) win.SetStatus("打开日志失败：" + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// 把设置里的 ffmpeg 路径同步给 Watermark。配置随时可能被改（设置页保存、
+        /// 导入配置），所以每次保存后都调一次，别指望只在启动时灌一次。
+        /// </summary>
+        public void SyncWatermarkFfmpeg()
+        {
+            Watermark.CustomPath = Config == null ? "" : (Config.FfmpegPath ?? "");
+            Watermark.ResetFfmpegCache();
+        }
+
+        /// <summary>
+        /// 出片后的角标验收（11-16）。**只对云端生成出来的新片子调用**，
+        /// 不碰主人自己导入的视频 —— 那些不是我们产出的，不能擅自动画面。
+        ///
+        /// 三种结果都要如实往外说，绝不能含糊成「已处理」：
+        ///   · 验过且干净（含修干净）→ 正常入库、照常换桌面；
+        ///   · 验过但不干净 → 状态栏明说，片子留在原地不播（主人要能看见并决定）；
+        ///   · 没 ffmpeg 没验成 → 明说「没验收」，片子留着（花了钱不能丢）。
+        /// </summary>
+        bool VerifyDeliveredVideo(string mp4, string id)
+        {
+            // 自检进程里绝不真跑 ffmpeg：那些「到货」是造的假 mp4，
+            // 真跑只会污染日志、拖慢自检、还可能改到临时文件。角标能力由 --watermarktest 单独验。
+            if (SelfTestArgs())
+            {
+                Log.Note("角标验收：自检模式跳过（" + id + "），能力验证见 --watermarktest");
+                return true;
+            }
+            if (Config == null || !Config.AutoDelogo)
+            {
+                Log.Note("角标验收：已按设置关闭（autoDelogo=false），" + id + " 直接交付");
+                return true;
+            }
+            Watermark.Outcome o = Watermark.VerifyAndRepair(mp4);
+            Log.Note((o.Clean ? "角标验收 √ " : "角标验收 !! ") + id + "：" + o.Msg);
+            if (!o.Checked)
+            {
+                SetStatusSafe("片子已到，但" + o.Msg);
+                return true;        // 没验 ≠ 有角标；不扣着主人花钱买来的片子
+            }
+            if (!o.Clean)
+            {
+                SetStatusSafe("这条片子" + o.Msg);
+                return false;       // 验过且不干净：不换上、不弹窗庆祝
+            }
+            if (o.Repaired) SetStatusSafe("片子有 AI 角标，已局部修补：" + id);
+            return true;
+        }
+
+        /// <summary>
+        /// 托盘「检查水印」：扫全库视频，列出带角标的，问一句再动手。
+        /// 与出片后的自动验收是两码事 —— 这里动的是**已有**的库文件，
+        /// 所以必须先列清单、等主人点头，绝不静默改。
+        /// </summary>
+        public void CheckWatermarks()
+        {
+            string why;
+            if (!Watermark.Available(out why))
+            {
+                MessageBox.Show("这条功能要用本机的 ffmpeg，现在没找到：\r\n\r\n" + why
+                    + "\r\n\r\n可以在「设置 → 出片 → ffmpeg 路径」里手动指定 ffmpeg.exe。",
+                    "检查水印", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            string root = Config.LibRoot;
+            string vdir = Path.Combine(root, "videos");
+            if (!Directory.Exists(vdir))
+            {
+                MessageBox.Show("这个库里还没有 videos 目录。", "检查水印",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            if (win != null) win.SetStatus("正在扫库里的视频角标，视频多的时候要一会儿…");
+            Task.Run(delegate
+            {
+                List<string> bad = new List<string>();
+                List<string> names = new List<string>();
+                string[] files;
+                try { files = Directory.GetFiles(vdir, "*.mp4"); }
+                catch (Exception ex) { SetStatusSafe("扫不了 videos 目录：" + ex.Message); return; }
+                Array.Sort(files);
+                for (int i = 0; i < files.Length; i++)
+                {
+                    string f = files[i];
+                    // 备份 / 临时文件不是交付物，跳过
+                    if (f.IndexOf(".bak", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    try
+                    {
+                        string err;
+                        Watermark.Badge b = Watermark.Measure(f, 1.0, out err);
+                        if (b == null)
+                        {
+                            Log.Note("检查水印：跳过 " + Path.GetFileName(f) + "（" + err + "）");
+                            continue;
+                        }
+                        if (b.Found)
+                        {
+                            bad.Add(f);
+                            names.Add(Path.GetFileName(f) + "　" + b.Text());
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Note("检查水印：跳过 " + Path.GetFileName(f) + "（" + ex.Message + "）");
+                    }
+                }
+
+                if (bad.Count == 0)
+                {
+                    SetStatusSafe("检查完了：库里没发现 AI 角标");
+                    string msg0 = "扫了 " + files.Length + " 个视频，没发现「AI生成」角标。";
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        MessageBox.Show(msg0, "检查水印", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }));
+                    return;
+                }
+
+                StringBuilder sb = new StringBuilder();
+                sb.Append("发现 ").Append(bad.Count).Append(" 个视频带「AI生成」角标：\r\n\r\n");
+                for (int i = 0; i < names.Count && i < 12; i++) sb.Append("· ").Append(names[i]).Append("\r\n");
+                if (names.Count > 12) sb.Append("…… 另有 ").Append(names.Count - 12).Append(" 个\r\n");
+                sb.Append("\r\n现在就修补吗？会重新编码这些片子（画质按 CRF 16，肉眼看不出差别），")
+                  .Append("原文件留 .bak-wm 备份。修补后复查不干净的会保留 .bak-wm 原样不动。");
+                // 问话必须回到 UI 线程，而且要在这里等答案（后面的活儿依赖「修不修」）
+                string ask = sb.ToString();
+                MessageBoxResult r = MessageBoxResult.No;
+                Dispatcher.Invoke(new Action(delegate
+                {
+                    r = MessageBox.Show(ask, "检查水印", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                }));
+                if (r != MessageBoxResult.Yes)
+                {
+                    SetStatusSafe("跳过了，没有改任何文件");
+                    return;
+                }
+
+                int ok = 0, fail = 0;
+                for (int i = 0; i < bad.Count; i++)
+                {
+                    SetStatusSafe("修补角标 " + (i + 1) + "/" + bad.Count + "：" + Path.GetFileName(bad[i]));
+                    Watermark.Outcome o = Watermark.VerifyAndRepair(bad[i]);
+                    Log.Note((o.Clean ? "补角标 √ " : "补角标 !! ") + Path.GetFileName(bad[i]) + "：" + o.Msg);
+                    if (o.Clean) ok++; else fail++;
+                }
+                SetStatusSafe("角标修补完成：干净 " + ok + " 个，未干净 " + fail + " 个（详见日志）");
+                string done = "修补完成：\r\n干净 " + ok + " 个\r\n未干净 " + fail + " 个\r\n\r\n"
+                    + "原文件都已备份成 .bak-wm。未干净的片子没有改动，可以稍后重试或重新生成。";
+                MessageBoxImage icon = fail == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning;
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    MessageBox.Show(done, "检查水印", MessageBoxButton.OK, icon);
+                }));
+            });
         }
 
         /// <summary>跑播放器自检，结果直接弹窗（不用你去翻日志）</summary>
@@ -3283,6 +3475,15 @@ namespace WallpaperManager
                     }
                     cloudPhase = "完成，等待换上";
                     Log.Note("云端(API)：出片 " + id + " → " + dst + "（" + dmsg + "）");
+                    // 11-16：下载完先过角标验收，再交给 SweepCloudJobs 换上。
+                    // 验出角标且没修干净的就地停下，别让带水印的片子播到桌面上。
+                    cloudPhase = "检查水印";
+                    if (!VerifyDeliveredVideo(dst, id))
+                    {
+                        SetStatusSafe("云端出片了，但角标没修干净，先不换上（原片保留，详见日志）");
+                        try { if (File.Exists(job)) CloudGen.MarkFailed(job, id); } catch { }
+                        return;
+                    }
                     SetStatusSafe("云端生成好了，正在换上");
                     return;     // 剩下的交给 SweepCloudJobs
                 }
@@ -3349,6 +3550,18 @@ namespace WallpaperManager
                     CloudGen.RemoveBuddyJob(id);
                     Log.Note("WorkBuddy 积分通道：到货 " + id + " → " + vid);
                     if (it == null) continue;
+
+                    // 11-16：会话出的片先过角标验收。没修干净就不标动态、不换上，
+                    // 卡片上如实显示，主人能看见也能自己决定重出。
+                    if (!VerifyDeliveredVideo(vid, id))
+                    {
+                        if (win != null)
+                        {
+                            win.RefreshList();
+                            win.SetStatus("出片到了，但 AI 角标没修干净，未启用：" + it.Title);
+                        }
+                        continue;
+                    }
 
                     // 11-15：到货自动换桌面有三种授权来源 ——
                     // ① 本次点击生成时记下的 pendingApplyId（App 没重启）；

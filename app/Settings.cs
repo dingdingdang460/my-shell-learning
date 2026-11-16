@@ -70,6 +70,9 @@ namespace WallpaperManager
         readonly CheckBox filterPortraitBox = new CheckBox();
         readonly CheckBox pauseOnBatteryBox = new CheckBox();   // 11-16 功耗守卫
         readonly TextBox batteryPctBox = new TextBox();
+        readonly CheckBox autoDelogoBox = new CheckBox();       // 11-16 角标验收
+        readonly TextBox ffmpegBox = new TextBox();
+        readonly TextBlock ffmpegState = new TextBlock();
         readonly TextBox proxyBox = new TextBox();
         readonly TextBox cacheBox = new TextBox();
         readonly TextBlock cacheInfo = new TextBlock();
@@ -305,6 +308,43 @@ namespace WallpaperManager
             genHint.Margin = new Thickness(0, 6, 0, 0);
             root.Children.Add(genHint);
 
+            // ---- 11-16：出片后的「AI生成」角标验收 ----
+            StyleCheck(autoDelogoBox, "出片后自动检查并修补左上角「AI生成」角标（推荐开）");
+            autoDelogoBox.Margin = new Thickness(0, 14, 0, 0);
+            root.Children.Add(autoDelogoBox);
+
+            TextBlock wmHint = new TextBlock();
+            wmHint.Text = "平台按《人工智能生成合成内容标识办法》会在画面左上角硬打角标，提示词去不掉。"
+                        + "开着的话：片子到货先抽帧检查，检出就 delogo 局部修补，复查干净才交付；"
+                        + "修不干净的不会换上桌面，原片留 .bak-wm 备份。\n"
+                        + "要用本机已有的 ffmpeg（不随程序分发、也不下载）。托盘「检查水印」可以"
+                        + "对库里已有的片子做一次同样的检查。";
+            wmHint.FontSize = 11.5;
+            wmHint.LineHeight = 18;
+            wmHint.TextWrapping = TextWrapping.Wrap;
+            wmHint.Foreground = TextDim;
+            wmHint.Margin = new Thickness(0, 6, 0, 0);
+            root.Children.Add(wmHint);
+
+            root.Children.Add(Label("ffmpeg 路径（留空 = 自动找：程序目录 / PATH / WorkBuddy 自带）"));
+            StackPanel ffRow = new StackPanel();
+            ffRow.Orientation = Orientation.Horizontal;
+            StyleInput(ffmpegBox);
+            ffmpegBox.Width = 420;
+            ffmpegBox.HorizontalAlignment = HorizontalAlignment.Left;
+            ffRow.Children.Add(ffmpegBox);
+            Button ffProbe = MakeButton("检测");
+            ffProbe.Margin = new Thickness(10, 0, 0, 0);
+            ffProbe.Click += delegate { ProbeFfmpeg(); };
+            ffRow.Children.Add(ffProbe);
+            root.Children.Add(ffRow);
+
+            ffmpegState.FontSize = 11.5;
+            ffmpegState.TextWrapping = TextWrapping.Wrap;
+            ffmpegState.Foreground = TextDim;
+            ffmpegState.Margin = new Thickness(0, 6, 0, 0);
+            root.Children.Add(ffmpegState);
+
             // 11-15：主人问「能不能用 WorkBuddy 里免费的 Hy4 / Hy3」。
             // 答案写在面板上，别让人以为下拉里少了两个免费模型。
             TextBlock buddyNote = new TextBlock();
@@ -518,6 +558,43 @@ namespace WallpaperManager
                 + "大概花费 " + GenModels.CostText(m, res, sec)
                 + "（" + m.Price(res).ToString("0.00", CultureInfo.InvariantCulture) + " 元/秒）"
                 + "　预计等待 " + GenModels.WaitText(m) + clampNote;
+        }
+
+        /// <summary>
+        /// 把「ffmpeg 到底找不找得到」显示在面板上。
+        /// 找不到就明说找不到（并把 ffmpeg 缺失的后果写清楚），
+        /// 绝不让主人以为角标验收在正常工作。
+        /// </summary>
+        void RefreshFfmpegState()
+        {
+            string why;
+            string path = Watermark.Resolve(out why);
+            if (path == null)
+            {
+                ffmpegState.Text = "× 没找到可用的 ffmpeg。出片后只能如实标「未验收」，不会假装干净。\r\n"
+                                 + why;
+                ffmpegState.Foreground = new SolidColorBrush(Color.FromRgb(240, 160, 150));
+                return;
+            }
+            ffmpegState.Text = "√ 已找到：" + path;
+            ffmpegState.Foreground = TextDim;
+        }
+
+        /// <summary>点「检测」：按当前输入框里的路径重新找一遍，当场给结果。</summary>
+        void ProbeFfmpeg()
+        {
+            string typed = ffmpegBox.Text == null ? "" : ffmpegBox.Text.Trim();
+            Watermark.CustomPath = typed;
+            Watermark.ResetFfmpegCache();
+            string why;
+            string path = Watermark.Resolve(out why);
+            RefreshFfmpegState();
+            if (path == null)
+            {
+                MessageBox.Show("这条路径下没有能用的 ffmpeg：\r\n\r\n" + typed + "\r\n\r\n" + why
+                    + "\r\n\r\n留空保存可以让程序自己找。",
+                    "检测 ffmpeg", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         /// <summary>
@@ -850,6 +927,10 @@ namespace WallpaperManager
             filterPortraitBox.IsChecked = c.FilterPortrait;
             pauseOnBatteryBox.IsChecked = c.PauseOnBattery;
             batteryPctBox.Text = c.BatteryPausePercent.ToString(CultureInfo.InvariantCulture);
+            autoDelogoBox.IsChecked = c.AutoDelogo;
+            ffmpegBox.Text = c.FfmpegPath == null ? "" : c.FfmpegPath;
+            ffmpegState.Text = "";
+            RefreshFfmpegState();
             proxyBox.Text = c.Proxy == null ? "" : c.Proxy;
             cacheBox.Text = c.CacheLimitMb.ToString(CultureInfo.InvariantCulture);
 
@@ -899,6 +980,12 @@ namespace WallpaperManager
             if (batteryPct < 0) batteryPct = 0;
             if (batteryPct > 100) batteryPct = 100;
             c.BatteryPausePercent = batteryPct;
+
+            // 11-16 角标验收：开关 + ffmpeg 路径。路径留空即自动发现，
+            // 填了但跑不起来也不拦保存（可能只是临时没插移动盘），探测结果在界面上说明。
+            c.AutoDelogo = autoDelogoBox.IsChecked == true;
+            c.FfmpegPath = ffmpegBox.Text == null ? "" : ffmpegBox.Text.Trim();
+            app.SyncWatermarkFfmpeg();
 
             // 代理：空 = 直连（保持以前的行为）。填错的地址不会炸，只是请求走不通，
             // 所以这里不拦，改完点保存即可，界面上不会弹「格式不对」烦人。
