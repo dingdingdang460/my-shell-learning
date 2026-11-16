@@ -175,6 +175,7 @@ namespace WallpaperManager
             {
                 int code = (int)r.StatusCode;
                 if (code == 401 || code == 403) return "鉴权失败（" + code + "）：API Key 不对或没开通这个模型";
+                if (code == 402) return "余额或额度不足（402）：去服务商控制台充值后再试";
                 if (code == 429) return "被限流了（429）：稍等一下再试";
                 if (code >= 500) return "服务端错误（" + code + "）：不是你的问题，过会儿再试";
                 return "HTTP " + code + " " + r.StatusDescription;

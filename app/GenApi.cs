@@ -143,8 +143,13 @@ namespace WallpaperManager
             catch (Exception ex) { r.Msg = "读图失败：" + ex.Message; return r; }
 
             // 目录外的手填 ID 一律回落到该服务商默认，避免请求发出去才发现模型名不存在
-            string model = GenModels.Resolve(p, cfg.GenModel).Id;
+            GenModelInfo mi = GenModels.Resolve(p, cfg.GenModel);
+            string model = mi.Id;
             string res = string.IsNullOrEmpty(cfg.GenResolution) ? "720P" : cfg.GenResolution;
+
+            // 11-16：秒数按这家模型真正接受的区间夹取。以前一律传 3，而 wan2.2 系列固定 5 秒，
+            // 服务端会直接报参数错；主人充值后第一次点生成就失败。
+            int dur = GenModels.ClampSeconds(mi, seconds);
 
             string url, auth, extra;
             StringBuilder sb = new StringBuilder();
@@ -158,8 +163,13 @@ namespace WallpaperManager
                 sb.Append(",\"input\":{\"prompt\":").Append(Json.Quote(prompt));
                 sb.Append(",\"img_url\":").Append(Json.Quote(dataUri)).Append("}");
                 sb.Append(",\"parameters\":{\"resolution\":").Append(Json.Quote(res));
-                sb.Append(",\"duration\":").Append(seconds);
-                sb.Append(",\"prompt_extend\":false,\"watermark\":false}}");
+                sb.Append(",\"duration\":").Append(dur);
+                sb.Append(",\"prompt_extend\":false,\"watermark\":false");
+                // 11-16：wan2.6 系列不传 audio 时默认「生成带声音的视频」，按有声价计费（无声价的两倍）。
+                // 壁纸不需要声音，显式关掉，账单才会和界面上显示的无声单价一致。
+                if (model.StartsWith("wan2.6", StringComparison.Ordinal))
+                    sb.Append(",\"audio\":false");
+                sb.Append("}}");
             }
             else
             {
@@ -169,7 +179,7 @@ namespace WallpaperManager
                 sb.Append("{\"model\":").Append(Json.Quote(model));
                 sb.Append(",\"content\":[{\"type\":\"text\",\"text\":").Append(Json.Quote(prompt)).Append("}");
                 sb.Append(",{\"type\":\"image_url\",\"image_url\":{\"url\":").Append(Json.Quote(dataUri)).Append("}}]");
-                sb.Append(",\"duration\":").Append(seconds);
+                sb.Append(",\"duration\":").Append(dur);
                 sb.Append(",\"ratio\":\"adaptive\",\"watermark\":false}");
             }
 

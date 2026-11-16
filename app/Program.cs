@@ -2139,8 +2139,9 @@ namespace WallpaperManager
             }
             GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
             bool ready = GenApi.Ready(Config);
-            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
-                    ? Config.GenSeconds : CloudGen.MaxSeconds;
+            int sec = GenModels.ClampSeconds(
+                GenModels.Resolve(p, Config.GenModel),
+                Config.GenSeconds >= 1 ? Config.GenSeconds : CloudGen.MaxSeconds);
             win.CloudChoose(it.Id, it.Title, ready, p, Config.GenModel, Config.GenResolution, sec);
             win.SetStatus("重新生成：确认后会重新计费，旧片先留 .bak-regen-* 备份");
         }
@@ -2473,8 +2474,9 @@ namespace WallpaperManager
             if (IsBuddyChannel()) { StartBuddyGen(it); return; }
             GenApi.Provider p = GenApi.ParseProvider(Config.GenProvider);
             bool ready = GenApi.Ready(Config);
-            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
-                    ? Config.GenSeconds : CloudGen.MaxSeconds;
+            int sec = GenModels.ClampSeconds(
+                GenModels.Resolve(p, Config.GenModel),
+                Config.GenSeconds >= 1 ? Config.GenSeconds : CloudGen.MaxSeconds);
             win.CloudChoose(it.Id, it.Title, ready, p, Config.GenModel, Config.GenResolution, sec);
             win.SetStatus(ready ? "已选好云端模型，确认后提交（会显示费用与预计等待）"
                                 : "云端生成需要先在设置里选服务商并填 API Key");
@@ -2725,8 +2727,8 @@ namespace WallpaperManager
             GenModelInfo m = GenModels.Resolve(p, Config == null ? "" : Config.GenModel);
             string res = (Config == null || string.IsNullOrEmpty(Config.GenResolution))
                 ? "720P" : Config.GenResolution;
-            int secCfg = (Config != null && Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
-                ? Config.GenSeconds : CloudGen.MaxSeconds;
+            int secCfg = GenModels.ClampSeconds(m,
+                Config != null && Config.GenSeconds >= 1 ? Config.GenSeconds : CloudGen.MaxSeconds);
 
             s.InfoLine = "模型 " + m.Id + " · " + res + " · " + secCfg + " 秒　｜　"
                        + GenApi.ProviderName(p) + "　｜　价格按公开单价估算，以账单为准";
@@ -2907,6 +2909,10 @@ namespace WallpaperManager
             string savedRes = Config.GenResolution;
             string savedPending = Config.PendingCloudId;
             int savedSeconds = Config.GenSeconds;
+            // 11-16：这段测的是「服务商 API 直连」，必须把通道固定成 api。
+            // 真实 config 默认是 buddy，GenCloud 会直接走 StartBuddyGen 的积分浮条，
+            // 第 0 步断言就变成「取消这单」而不是「去设置」——以前能过只是因为当时配的是 api。
+            string savedChannel = Config.GenChannel;
             string savedEndpoint = GenApi.EndpointOverride;
             int savedPoll = GenApi.PollIntervalMs;
             string tmp = "";
@@ -2927,6 +2933,7 @@ namespace WallpaperManager
                 Config.GenResolution = savedRes;
                 Config.PendingCloudId = savedPending;
                 Config.GenSeconds = savedSeconds;
+                Config.GenChannel = savedChannel;
                 ConfigStore.DirOverride = savedDirOverride;
                 GenApi.PollIntervalMs = savedPoll;
                 cloudPhase = "";
@@ -2949,6 +2956,8 @@ namespace WallpaperManager
 
             try
             {
+                Config.GenChannel = "api";      // 见上方 savedChannel 的说明
+
                 // ---- 0) 主人当前的状态：没填 Key。点击必须给明确引导，且绝不写假工单 ----
                 // 11-14：这一步必须挑一张「确实没有相关视频」的条目。库里那几张静态图
                 // 现在都有片子了，拿它们会被「有片就播」的总闸拦下 —— 那是正确行为，
@@ -3196,8 +3205,7 @@ namespace WallpaperManager
             if (win != null)
             {
                 GenModelInfo mm = GenModels.Resolve(GenApi.ParseProvider(Config.GenProvider), Config.GenModel);
-                int s2 = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
-                       ? Config.GenSeconds : CloudGen.MaxSeconds;
+                int s2 = GenModels.ClampSeconds(mm, Config.GenSeconds >= 1 ? Config.GenSeconds : CloudGen.MaxSeconds);
                 win.SetStatus(msg + " · " + mm.Id + " · "
                     + GenModels.CostText(mm, Config.GenResolution, s2) + " · " + CloudChannel()
                     + " · 工单：" + CloudGen.JobPath(it.Id));   // 主人要能自己找到这单
@@ -3224,8 +3232,10 @@ namespace WallpaperManager
                 return;
             }
             string job = CloudGen.JobPath(id);
-            int sec = (Config.GenSeconds >= 1 && Config.GenSeconds <= CloudGen.MaxSeconds)
-                      ? Config.GenSeconds : CloudGen.MaxSeconds;
+            // 11-16：按模型夹取实际出片秒数。wan2.2 系列固定 5 秒，传 3 会被服务端拒，
+            // 主人充值后第一次点生成就失败；现在提交参数一定在合法区间内。
+            GenModelInfo apiModel = GenModels.Resolve(GenApi.ParseProvider(Config.GenProvider), Config.GenModel);
+            int sec = GenModels.ClampSeconds(apiModel, Config.GenSeconds >= 1 ? Config.GenSeconds : CloudGen.MaxSeconds);
             WallpaperItem it = FindById(id);
             string prompt = CloudGen.BuildPrompt(it, sec);
             string who = GenApi.ProviderName(GenApi.ParseProvider(Config.GenProvider));

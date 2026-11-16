@@ -470,9 +470,13 @@ namespace WallpaperManager
             GenApi.Provider p = CurrentProvider();
             string res = CurrentResolution();
             List<GenModelInfo> list = GenModels.For(p);
+            // 11-16：下拉标签里的秒数按「当前设置 + 该模型的合法区间」算，
+            // 免得 wan2.2 那种固定 5 秒的模型还标着「3 秒 ¥0.45」。
+            int wantSec = (app != null && app.Config != null && app.Config.GenSeconds >= 1)
+                        ? app.Config.GenSeconds : CloudGen.MaxSeconds;
             modelCombo.Items.Clear();
             for (int i = 0; i < list.Count; i++)
-                modelCombo.Items.Add(GenModels.ComboLabel(list[i], res, CloudGen.MaxSeconds));
+                modelCombo.Items.Add(GenModels.ComboLabel(list[i], res, wantSec));
 
             string wantedId;
             if (keep.Length > 0) wantedId = keep;
@@ -500,14 +504,20 @@ namespace WallpaperManager
         {
             GenModelInfo m = SelectedModel();
             if (m == null) { genEstimate.Text = ""; return; }
-            int sec = CloudGen.MaxSeconds;
-            if (app != null && app.Config != null && app.Config.GenSeconds >= 1
-                && app.Config.GenSeconds < sec) sec = app.Config.GenSeconds;
+
+            // 11-16：先按主人设的秒数，再夹到该模型的合法区间。
+            // 被夹取时明说，不让「界面写 3 秒、实际出 5 秒」再发生一次。
+            int asked = (app != null && app.Config != null && app.Config.GenSeconds >= 1)
+                      ? app.Config.GenSeconds : CloudGen.MaxSeconds;
+            int sec = GenModels.ClampSeconds(m, asked);
             string res = CurrentResolution();
+            string clampNote = sec == asked ? "" :
+                "（这个模型只支持 " + m.MinSeconds + "-" + m.MaxSeconds + " 秒，按 " + sec + " 秒算）";
+
             genEstimate.Text = "本次生成：" + sec + " 秒 · " + res + " · " + m.Label + "\n"
                 + "大概花费 " + GenModels.CostText(m, res, sec)
                 + "（" + m.Price(res).ToString("0.00", CultureInfo.InvariantCulture) + " 元/秒）"
-                + "　预计等待 " + GenModels.WaitText(m);
+                + "　预计等待 " + GenModels.WaitText(m) + clampNote;
         }
 
         /// <summary>
@@ -548,6 +558,20 @@ namespace WallpaperManager
                      && SelectedModel().Id == "wan2.6-i2v-flash";
             if (!wanx) ok = false;
             sb.Append("通义模型下拉 3 项 + 默认 Flash ").Append(wanx ? "√" : "×").Append("\r\n");
+
+            // 11-16：秒数必须按模型夹取。wan2.6 支持 2-15 秒；wan2.2 固定 5 秒，传 3 得 5。
+            // 费用也按夹取后的秒数算 —— 界面写 3 秒、实际出 5 秒、账单对不上，就是这里漏了。
+            bool clampOk = GenModels.ClampSeconds(GenModels.Find("wan2.6-i2v-flash"), 3) == 3
+                        && GenModels.ClampSeconds(GenModels.Find("wan2.6-i2v-flash"), 99) == 15
+                        && GenModels.ClampSeconds(GenModels.Find("wan2.2-i2v-flash"), 3) == 5
+                        && GenModels.ClampSeconds(GenModels.Find("wan2.2-i2v-flash"), 30) == 5;
+            if (!clampOk) ok = false;
+            sb.Append("秒数按模型夹取（2.6 支持 3 / 2.2 固定 5） ").Append(clampOk ? "√" : "×").Append("\r\n");
+
+            double cFixed = GenModels.Cost(GenModels.Find("wan2.2-i2v-flash"), "720P", 3);   // 0.20 × 5 = 1.00
+            bool costFixedOk = Math.Abs(cFixed - 1.00) < 0.0001;
+            if (!costFixedOk) ok = false;
+            sb.Append("固定 5 秒模型的费用按 5 秒算（¥1.00） ").Append(costFixedOk ? "√" : "×").Append("\r\n");
 
             GenModelInfo flash = SelectedModel();
             double c720 = GenModels.Cost(flash, "720P", 3);

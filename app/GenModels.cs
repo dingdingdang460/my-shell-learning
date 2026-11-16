@@ -39,6 +39,12 @@ namespace WallpaperManager
         public bool IsDefault;
         public string Note;          // 价格口径备注（是否在账单上按 token 结算等）
 
+        // 11-16：这家模型能接受的出片秒数区间。以前程序一律按 3 秒传，
+        // 但通义部分模型固定 5 秒（wan2.2/2.1 系列），传 3 会被服务端拒；
+        // 充值后第一次点生成就失败，体验很差。现在按模型夹取，下单参数一定合法。
+        public int MinSeconds = 2;
+        public int MaxSeconds = 15;
+
         /// <summary>取对应分辨率的秒单价；未知分辨率一律按 720P 算（宁可报低不报高）</summary>
         public double Price(string resolution)
         {
@@ -57,22 +63,28 @@ namespace WallpaperManager
         static GenModels()
         {
             Add("wan2.6-i2v-flash", "万相 2.6 Flash（快、最便宜）", GenApi.Provider.Wanx,
-                0.15, 0.25, 60, 180, true, "官方按秒计价：720P 无声 ¥0.15/秒、1080P 无声 ¥0.25/秒");
+                0.15, 0.25, 60, 180, true, "官方按秒计价：720P 无声 ¥0.15/秒、1080P 无声 ¥0.25/秒",
+                2, 15);
             Add("wan2.2-i2v-flash", "万相 2.2 Flash（老版、稍贵）", GenApi.Provider.Wanx,
-                0.20, 0.48, 90, 240, false, "官方按秒计价：720P 无声 ¥0.20/秒、1080P 无声 ¥0.48/秒");
+                0.20, 0.48, 90, 240, false, "官方按秒计价：720P 无声 ¥0.20/秒、1080P 无声 ¥0.48/秒",
+                5, 5);
             Add("wan2.6-i2v", "万相 2.6 标准（带声音、贵）", GenApi.Provider.Wanx,
-                0.60, 1.00, 120, 300, false, "官方按秒计价：720P ¥0.6/秒、1080P ¥1.0/秒");
+                0.60, 1.00, 120, 300, false, "官方按秒计价：720P ¥0.6/秒、1080P ¥1.0/秒",
+                2, 15);
 
             Add("doubao-seedance-1-0-pro-fast-251015", "Seedance 1.0 Pro Fast（效果接近参考片）",
                 GenApi.Provider.Ark, 0.09, 0.20, 90, 300, true,
-                "按 token 计费（¥4.2/百万 token），此处按 24fps 折算成秒价，以账单为准");
+                "按 token 计费（¥4.2/百万 token），此处按 24fps 折算成秒价，以账单为准",
+                3, 12);
             Add("doubao-seedance-1-0-pro-250528", "Seedance 1.0 Pro（更慢更贵）",
                 GenApi.Provider.Ark, 0.32, 0.73, 180, 480, false,
-                "按 token 计费（¥15/百万 token），此处按 24fps 折算成秒价，以账单为准");
+                "按 token 计费（¥15/百万 token），此处按 24fps 折算成秒价，以账单为准",
+                3, 12);
         }
 
         static void Add(string id, string label, GenApi.Provider p,
-                        double p720, double p1080, int wmin, int wmax, bool def, string note)
+                        double p720, double p1080, int wmin, int wmax, bool def, string note,
+                        int minSec, int maxSec)
         {
             GenModelInfo m = new GenModelInfo();
             m.Id = id;
@@ -84,6 +96,8 @@ namespace WallpaperManager
             m.WaitMaxSec = wmax;
             m.IsDefault = def;
             m.Note = note;
+            m.MinSeconds = minSec;
+            m.MaxSeconds = maxSec;
             all.Add(m);
         }
 
@@ -130,12 +144,24 @@ namespace WallpaperManager
             return DefaultFor(p);
         }
 
-        /// <summary>费用估算（纯函数，自检可直接断言）：秒单价 × 秒数</summary>
+        /// <summary>
+        /// 把想要的秒数夹到这家模型真正接受的区间（纯函数，自检直接断言）。
+        /// 例如 wan2.2-i2v-flash 固定 5 秒，传 3 会得到 5 —— 不夹的话服务端直接报参数错。
+        /// </summary>
+        public static int ClampSeconds(GenModelInfo m, int seconds)
+        {
+            if (m == null) return seconds < 1 ? 1 : seconds;
+            if (seconds < m.MinSeconds) seconds = m.MinSeconds;
+            if (seconds > m.MaxSeconds) seconds = m.MaxSeconds;
+            return seconds;
+        }
+
+        /// <summary>费用估算（纯函数，自检可直接断言）：秒单价 × 实际会出片的秒数</summary>
         public static double Cost(GenModelInfo m, string resolution, int seconds)
         {
             if (m == null) return 0.0;
+            seconds = ClampSeconds(m, seconds);
             if (seconds < 1) seconds = 1;
-            if (seconds > CloudGen.MaxSeconds) seconds = CloudGen.MaxSeconds;
             return m.Price(resolution) * seconds;
         }
 
@@ -180,8 +206,9 @@ namespace WallpaperManager
         {
             if (m == null) return "";
             double per = m.Price(resolution);
+            int sec = ClampSeconds(m, seconds);
             return m.Label + "　｜" + per.ToString("0.00", CultureInfo.InvariantCulture)
-                 + " 元/秒　｜" + WaitText(m) + "　｜3 秒 " + CostText(m, resolution, seconds);
+                 + " 元/秒　｜" + WaitText(m) + "　｜" + sec + " 秒 " + CostText(m, resolution, sec);
         }
     }
 }
