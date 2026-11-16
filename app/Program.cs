@@ -1761,6 +1761,19 @@ namespace WallpaperManager
             Forms.ToolStripMenuItem miWm = new Forms.ToolStripMenuItem("检查水印（AI 角标）");
             miWm.Click += delegate { CheckWatermarks(); };
 
+            // 11-16 晚：主人删了壁纸后在资源管理器里翻不到，给一个直达入口。
+            // 删掉的图确实在回收站里，只是名字是 biliart-xxxx.jpg，混在一堆 $R 文件里不好认。
+            Forms.ToolStripMenuItem miBin = new Forms.ToolStripMenuItem("打开回收站（删掉的壁纸在这）");
+            miBin.Click += delegate
+            {
+                try
+                {
+                    Process.Start("explorer.exe", "shell:RecycleBinFolder");
+                    Log.Note("托盘：打开系统回收站");
+                }
+                catch (Exception ex) { Log.Note("打开回收站失败：" + ex.Message); }
+            };
+
             Forms.ToolStripMenuItem miExit = new Forms.ToolStripMenuItem("退出");
             miExit.Click += delegate { Log.Note("托盘：退出"); ExitApp(); };
 
@@ -1793,6 +1806,7 @@ namespace WallpaperManager
             menu.Items.Add(miSettings);
             menu.Items.Add(miLog);
             menu.Items.Add(miWm);
+            menu.Items.Add(miBin);
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add(miExit);
             tray.ContextMenuStrip = menu;
@@ -4173,7 +4187,8 @@ namespace WallpaperManager
             }
 
             string err;
-            if (!LibraryStore.Delete(it, Config.LibRoot, out err))
+            DeleteReport rpt;
+            if (!LibraryStore.Delete(it, Config.LibRoot, out err, out rpt))
             {
                 if (win != null) win.SetStatus("删除失败：" + err);
                 Log.Note("删除壁纸失败：" + it.Id + " · " + err);
@@ -4205,12 +4220,49 @@ namespace WallpaperManager
             }
 
             ConfigStore.Save(Config);
-            Log.Note("已删除壁纸：" + it.Id + "（" + it.Title + "）");
+            // 11-16 晚：不再笼统写「已删除」—— 文件到底进了回收站还是被永久删掉，
+            // 日志和状态栏都得说清楚，否则主人又得去回收站里翻半天。
+            Log.Note("已删除壁纸：" + it.Id + "（" + it.Title + "）｜" + DeleteTally(rpt));
             if (win != null)
             {
                 win.RefreshList();
-                win.SetStatus("已删除：" + it.Title);
+                win.SetStatus(DeleteStatus(it, rpt));
             }
+        }
+
+        /// <summary>删除账目（写日志用，一行看全）</summary>
+        static string DeleteTally(DeleteReport rpt)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("回收站 ").Append(rpt.Recycled);
+            sb.Append(" / 永久删除 ").Append(rpt.Vanished);
+            sb.Append(" / 没删掉 ").Append(rpt.Failed);
+            sb.Append(" / 去向未确认 ").Append(rpt.Unverified);
+            if (rpt.TrashDir.Length > 0) sb.Append(" / 副本 ").Append(rpt.TrashDir);
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 状态栏文案。口径硬要求：进了回收站才能说「可在回收站还原」；
+        /// 没进就老老实实说「已永久删除」，并给出副本目录，绝不许含糊过去。
+        /// </summary>
+        static string DeleteStatus(WallpaperItem it, DeleteReport rpt)
+        {
+            string head = "已删除：" + it.Title;
+            string copy = rpt.TrashDir.Length > 0 ? "，副本在 " + rpt.TrashDir : "";
+
+            if (rpt.Vanished > 0 && rpt.Unverified > 0)
+                return head + "（" + rpt.Vanished + " 个文件回收站没接住、已永久删除，另有 "
+                       + rpt.Unverified + " 个去向未确认" + copy + "）";
+            if (rpt.Vanished > 0)
+                return head + "（" + rpt.Vanished + " 个文件回收站没接住、已永久删除" + copy + "）";
+            if (rpt.Unverified > 0)
+                return head + "（" + rpt.Unverified + " 个文件去向未确认" + copy + "）";
+            if (rpt.Failed > 0)
+                return head + "（" + rpt.Failed + " 个文件没删掉，可能被播放器占用）";
+            if (rpt.Recycled > 0)
+                return head + "（已移入回收站，可在回收站里还原）";
+            return head + "（磁盘上已经没有对应文件）";
         }
 
         // ---------------- 日常便利：收藏 / 历史回滚 / 导入 / 暂停 ----------------

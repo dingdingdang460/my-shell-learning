@@ -6,6 +6,28 @@ using System.Text;
 
 namespace WallpaperManager
 {
+    /// <summary>
+    /// 一次删除的真实账目（11-16 新增）。以前 Delete 只回 true/false，
+    /// 界面只能笼统说「已删除」，主人根本不知道文件去哪了、还能不能捞回来。
+    /// </summary>
+    public sealed class DeleteReport
+    {
+        /// <summary>确认进了回收站（回收站里能看到、能还原）</summary>
+        public int Recycled;
+        /// <summary>没能进回收站，已被永久删除（副本留在 TrashDir）</summary>
+        public int Vanished;
+        /// <summary>没删掉（被占用 / 没权限）</summary>
+        public int Failed;
+        /// <summary>删掉了，但读不到回收站目录，去向未确认（副本留在 TrashDir）</summary>
+        public int Unverified;
+        /// <summary>留了副本的目录；没留副本时为空串</summary>
+        public string TrashDir = "";
+
+        public int Total { get { return Recycled + Vanished + Failed + Unverified; } }
+        /// <summary>有任何文件没能确认进回收站 —— 界面必须说清楚，不能笼统说「已删除」</summary>
+        public bool HasRisk { get { return Vanished > 0 || Unverified > 0; } }
+    }
+
     /// <summary>本地壁纸库：读 index.json、扫描 images 目录、按需下载 4K 封面</summary>
     public static class LibraryStore
     {
@@ -135,9 +157,24 @@ namespace WallpaperManager
         /// 反过来先删文件、索引写失败的话，库里会留一条指向不存在文件的黑卡。
         /// 删文件前会校验路径确实在库根下面，避免 index.json 里被人写了
         /// 绝对路径或 ../ 时误删库外的文件。
+        ///
+        /// 不关心文件去向的老调用用这个；要告诉用户「能不能还原」的走下面那个重载。
         /// </summary>
         public static bool Delete(WallpaperItem item, string root, out string err)
         {
+            DeleteReport dump;
+            return Delete(item, root, out err, out dump);
+        }
+
+        /// <summary>
+        /// 从库里删掉一条，并把「文件到底去哪了」记账回来。
+        /// 顺序：先重写 index.json（去掉这个 id），再把文件送回收站。
+        /// 删文件前会校验路径确实在库根下面，避免 index.json 里被人写了
+        /// 绝对路径或 ../ 时误删库外的文件。
+        /// </summary>
+        public static bool Delete(WallpaperItem item, string root, out string err, out DeleteReport rpt)
+        {
+            rpt = new DeleteReport();
             err = "";
             if (item == null) { err = "条目为空"; return false; }
             if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) { err = "壁纸库目录不存在"; return false; }
@@ -181,11 +218,17 @@ namespace WallpaperManager
             }
 
             // 2) 删文件：主文件、缩略图、封面
-            DeleteUnder(root, ToAbs(root, item.File));
-            DeleteUnder(root, ToAbs(root, item.Thumb));
-            DeleteUnder(root, Path.Combine(root, "images", item.Id + ".jpg"));
-            DeleteUnder(root, Path.Combine(root, "thumbs", item.Id + ".jpg"));
-            DeleteUnder(root, Path.Combine(root, "images", item.Id + ".png"));
+            //    同一次删除共用一个 .trash\<时间戳> 目录，留给「没能进回收站」的文件当救命副本
+            string stampDir = Path.Combine(Path.Combine(root, ".trash"),
+                DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Environment.TickCount);
+            DeleteUnder(root, ToAbs(root, item.File), stampDir, rpt);
+            DeleteUnder(root, ToAbs(root, item.Thumb), stampDir, rpt);
+            DeleteUnder(root, Path.Combine(root, "images", item.Id + ".jpg"), stampDir, rpt);
+            DeleteUnder(root, Path.Combine(root, "thumbs", item.Id + ".jpg"), stampDir, rpt);
+            DeleteUnder(root, Path.Combine(root, "images", item.Id + ".png"), stampDir, rpt);
+
+            // 3) 全部进了回收站 → 撤掉空目录，不留垃圾
+            TrimTrash(root, stampDir, rpt);
             return true;
         }
 
@@ -268,8 +311,16 @@ namespace WallpaperManager
             return true;
         }
 
-        /// <summary>只删库根目录之下的文件；越界一律不动（防误删）</summary>
-        static void DeleteUnder(string root, string path)
+        /// <summary>
+        /// 只删库根目录之下的文件；越界一律不动（防误删）。
+        ///
+        /// 11-16 晚改：先给文件在 .trash 里留一份副本，再送回收站，按**真实结局**记账。
+        /// 原因是 SHFileOperation 返回 0 + 文件消失 ≠ 进了回收站：回收站被关、超出配额、
+        /// 网络盘 / 可移动盘上 Windows 会直接永久删除，返回值照样是 0。只验「路径没了」
+        /// 就会把「永久删掉」报成「已进回收站」—— 主人 11-16 就是这么被误导的。
+        /// 现在：确认进回收站才删副本；真被永久删了就把副本留在 .trash，至少还捞得回来。
+        /// </summary>
+        static void DeleteUnder(string root, string path, string stampDir, DeleteReport rpt)
         {
             if (string.IsNullOrEmpty(path)) return;
             try
@@ -280,10 +331,91 @@ namespace WallpaperManager
                 if (!full.StartsWith(guard, StringComparison.OrdinalIgnoreCase)) return;
                 if (!File.Exists(full)) return;
 
-                // 11-16：先进回收站，误删还能捞回来；回收站不可用（网络盘 / 策略关闭）
-                // 才退回硬删，保持「删除就一定删掉」的旧语义，不让能力缺失卡住删除流程。
-                if (Recycle.MoveToRecycleBin(full)) return;
-                File.Delete(full);
+                // 1) 先留副本（同卷复制，几万字节到几兆，代价可以接受）
+                string bak = Backup(full, stampDir);
+
+                // 2) 送回收站，按真实结局记账
+                RecycleOutcome o = Recycle.MoveToRecycleBin(full);
+
+                if (o == RecycleOutcome.Recycled)
+                {
+                    Drop(bak);                       // 回收站收好了，副本没用了
+                    rpt.Recycled++;
+                    return;
+                }
+                if (o == RecycleOutcome.NotFound)
+                {
+                    Drop(bak);                       // 本来就不在，别留空副本
+                    return;
+                }
+                if (o == RecycleOutcome.Failed)
+                {
+                    // 回收站不接（被占用 / 无权限）：老语义是硬删，别让删除卡住；
+                    // 但这时副本必须留着，否则就是「删了就真没了」。
+                    bool killed = false;
+                    try { File.Delete(full); killed = true; }
+                    catch { rpt.Failed++; }
+                    if (killed) { rpt.Vanished++; Keep(rpt, stampDir); }
+                    else Drop(bak);
+                    return;
+                }
+
+                // Vanished / Unverified：文件已经没了，副本是唯一能捞回来的东西，必须留
+                if (o == RecycleOutcome.Vanished) rpt.Vanished++;
+                else rpt.Unverified++;
+                Keep(rpt, stampDir);
+            }
+            catch { }
+        }
+
+        /// <summary>把文件复制一份到副本目录；失败返回空串（没副本也不能卡住删除）</summary>
+        static string Backup(string full, string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return "";
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string name = Path.GetFileName(full);
+                string bak = Path.Combine(dir, name);
+                int n = 2;
+                while (File.Exists(bak))
+                {
+                    bak = Path.Combine(dir, Path.GetFileNameWithoutExtension(name)
+                                             + "~" + n + Path.GetExtension(name));
+                    n++;
+                }
+                File.Copy(full, bak, false);
+                return bak;
+            }
+            catch { return ""; }
+        }
+
+        static void Drop(string bak)
+        {
+            if (string.IsNullOrEmpty(bak)) return;
+            try { if (File.Exists(bak)) File.Delete(bak); } catch { }
+        }
+
+        /// <summary>标记「这次删除留了副本」，界面据此告诉用户副本在哪</summary>
+        static void Keep(DeleteReport rpt, string stampDir)
+        {
+            if (rpt == null || string.IsNullOrEmpty(stampDir)) return;
+            rpt.TrashDir = stampDir;
+        }
+
+        /// <summary>没有需要留副本的文件时，把刚建的 .trash 空目录撤干净</summary>
+        static void TrimTrash(string root, string stampDir, DeleteReport rpt)
+        {
+            if (rpt != null && rpt.TrashDir.Length > 0) return;   // 留了副本，目录得留着
+            try
+            {
+                if (!string.IsNullOrEmpty(stampDir) && Directory.Exists(stampDir)
+                    && Directory.GetFileSystemEntries(stampDir).Length == 0)
+                    Directory.Delete(stampDir, true);
+
+                string top = Path.Combine(root, ".trash");
+                if (Directory.Exists(top) && Directory.GetFileSystemEntries(top).Length == 0)
+                    Directory.Delete(top, true);
             }
             catch { }
         }

@@ -2096,13 +2096,18 @@ namespace WallpaperManager
                 readOk ? ("电源=" + (onBattery ? "电池" : "交流") + " 电量=" + pct + "%")
                        : ("读不到：" + readWhy));
 
-            // ---- 四、回收站：临时文件 / 子目录删完真的不在 ----
+            // ---- 四、回收站：不止「删完真的不在」，还要确认真的进了回收站 ----
+            // 11-16 晚：主人报「删除进回收站没生效、删了就找不到了」。根因是旧断言只验
+            // 「原路径消失」，而 Windows 在回收站被关 / 超配额时是**直接永久删除**、
+            // SHFileOperation 照样返回 0 —— 于是「永久删掉」被当成「已回收」报成功。
+            // 现在必须验到 RecycleOutcome.Recycled（数该卷 $Recycle.Bin 的 $I 记录确实多了一条）。
             string dir = Path.Combine(Path.GetTempPath(), "wb-guardtest-" + Environment.TickCount);
             string f1 = Path.Combine(dir, "recycle-me.txt");
             string sub = Path.Combine(dir, "sub");
             string f2 = Path.Combine(sub, "nested.txt");
             bool recOk = false;
             bool dirOk = false;
+            bool notFoundOk = false;
             try
             {
                 Directory.CreateDirectory(dir);
@@ -2110,8 +2115,17 @@ namespace WallpaperManager
                 Directory.CreateDirectory(sub);
                 File.WriteAllText(f2, "nested " + DateTime.Now.Ticks, new UTF8Encoding(false));
 
-                recOk = Recycle.MoveToRecycleBin(f1) && !File.Exists(f1);
-                dirOk = Recycle.MoveToRecycleBin(sub) && !Directory.Exists(sub);
+                notFoundOk = Recycle.MoveToRecycleBin(Path.Combine(dir, "not-there.txt"))
+                             == RecycleOutcome.NotFound;
+
+                RecycleOutcome o1 = Recycle.MoveToRecycleBin(f1);
+                recOk = o1 == RecycleOutcome.Recycled && !File.Exists(f1);
+
+                RecycleOutcome o2 = Recycle.MoveToRecycleBin(sub);
+                dirOk = o2 == RecycleOutcome.Recycled && !Directory.Exists(sub);
+
+                sb.Append("  （回收站结局：文件=").Append(o1)
+                  .Append(" 目录=").Append(o2).Append("）\r\n");
             }
             catch (Exception ex)
             {
@@ -2121,8 +2135,48 @@ namespace WallpaperManager
             {
                 try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
             }
-            Hit(sb, ref pass, ref total, "单个文件进回收站 → 原路径消失", recOk, "");
-            Hit(sb, ref pass, ref total, "整个子目录进回收站 → 原路径消失", dirOk, "");
+            Hit(sb, ref pass, ref total, "单个文件删除 → 确认进了回收站（不是消失就算）", recOk, "");
+            Hit(sb, ref pass, ref total, "整个子目录删除 → 确认进了回收站", dirOk, "");
+            Hit(sb, ref pass, ref total, "不存在的路径 → 不许当成已回收", notFoundOk, "");
+
+            // 记账口径：删除要回报「几个进了回收站」，界面才敢说「可还原」
+            bool tallyOk = false;
+            string libTmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-lib-" + Environment.TickCount);
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(libTmp, "images"));
+                Directory.CreateDirectory(Path.Combine(libTmp, "thumbs"));
+                File.WriteAllText(Path.Combine(libTmp, "images", "zz-guard-1.jpg"), "x", new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(libTmp, "thumbs", "zz-guard-1.jpg"), "x", new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(libTmp, "index.json"),
+                    "[{\"id\":\"zz-guard-1\",\"title\":\"guard\",\"file\":\"images/zz-guard-1.jpg\"}]",
+                    new UTF8Encoding(false));
+
+                WallpaperItem fake = new WallpaperItem();
+                fake.Id = "zz-guard-1";
+                fake.Title = "guard";
+                fake.File = "images/zz-guard-1.jpg";
+                fake.Thumb = "thumbs/zz-guard-1.jpg";
+
+                string derr;
+                DeleteReport dr;
+                bool ok = LibraryStore.Delete(fake, libTmp, out derr, out dr);
+                tallyOk = ok && dr.Recycled == 2 && dr.Vanished == 0 && dr.Failed == 0
+                          && !File.Exists(Path.Combine(libTmp, "images", "zz-guard-1.jpg"));
+                sb.Append("  （删除记账：进回收站=").Append(dr.Recycled)
+                  .Append(" 永久=").Append(dr.Vanished)
+                  .Append(" 失败=").Append(dr.Failed)
+                  .Append(" 未确认=").Append(dr.Unverified).Append("）\r\n");
+            }
+            catch (Exception ex)
+            {
+                sb.Append("  （删除记账测试异常：").Append(ex.Message).Append("）\r\n");
+            }
+            finally
+            {
+                try { if (Directory.Exists(libTmp)) Directory.Delete(libTmp, true); } catch { }
+            }
+            Hit(sb, ref pass, ref total, "删除回报账目：两个文件都记账为「已进回收站」", tallyOk, "");
 
             // ---- 五、配置字段往返 ----
             string tmp = Path.Combine(Path.GetTempPath(), "wb-guardtest-cfg.json");

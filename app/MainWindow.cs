@@ -3166,7 +3166,7 @@ namespace WallpaperManager
             cm.Items.Add(sp);
 
             MenuItem mDel = new MenuItem();
-            mDel.Header = "删除这张（连文件一起删）";
+            mDel.Header = "删除这张（移入回收站）";
             mDel.Foreground = new SolidColorBrush(Color.FromRgb(226, 132, 132));
             mDel.Click += delegate { ConfirmDelete(it); };
             cm.Items.Add(mDel);
@@ -3174,14 +3174,20 @@ namespace WallpaperManager
             return cm;
         }
 
-        /// <summary>删除确认：会删磁盘文件，必须先问一句</summary>
+        /// <summary>
+        /// 删除确认：会动磁盘文件，必须先问一句。
+        /// 11-16 晚改口径：说清「移入回收站、能还原」；回收站不可用时会被永久删除，
+        /// 这点也得提前讲明，不能让主人以为一定捞得回来。
+        /// </summary>
         void ConfirmDelete(WallpaperItem it)
         {
             if (it == null) return;
-            string extra = it.IsVideo ? "\r\n\r\n这是动态壁纸视频，删除后无法恢复。" : "";
+            string extra = it.IsVideo ? "\r\n\r\n这是动态壁纸视频，视频文件也会一起删除。" : "";
             MessageBoxResult r = MessageBox.Show(
                 "从壁纸库删除「" + DisplayTitle(it.Title) + "」？" + extra +
-                "\r\n\r\n磁盘上的文件会一起删除，不能撤销。",
+                "\r\n\r\n磁盘文件会移入回收站，之后可以在回收站里还原。" +
+                "\r\n如果这台机器的回收站不可用（被关闭 / 网络盘），文件会被永久删除，" +
+                "届时库里的 .trash 目录会留一份副本备查。",
                 "删除壁纸",
                 MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel);
             if (r != MessageBoxResult.OK) return;
