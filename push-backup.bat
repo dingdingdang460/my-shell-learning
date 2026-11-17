@@ -44,9 +44,25 @@ for /f "usebackq delims=" %%L in ("%PATFILE%") do (
 if not defined PAT goto :nopat
 if /i "%PAT%"=="PASTE_YOUR_GITHUB_TOKEN_HERE" goto :nopat
 
+rem Three fixes needed on this PC (all verified by live tests):
+rem 1) HOME override bypasses user-level ghproxy insteadOf rewrite (does not support token push).
+rem 2) Clear proxy vars: the local proxy at 127.0.0.1:54244 returns 502 for GitHub CONNECT.
+rem 3) Pin github.com to a reachable IP via GIT_HTTP_RESOLVE - DNS resolves to an unreachable IP here.
+set "TMPHOME=%TEMP%\wallpaper-gitpush-home"
+if not exist "%TMPHOME%" mkdir "%TMPHOME%"
+set "HOME=%TMPHOME%"
+set "http_proxy="
+set "https_proxy="
+set "HTTP_PROXY="
+set "HTTPS_PROXY="
+set "all_proxy="
+set "ALL_PROXY="
+rem 140.82.114.4 is GitHub's official frontend IP; DNS here resolves to an unreachable CDN IP.
+set "GIT_HTTP_RESOLVE=github.com:443:140.82.114.4"
+
 echo.
 echo [1/2] Pushing main via PAT (this may take 10-40s)...
-git push "https://dingdingdang460:%PAT%@github.com/dingdingdang460/my-shell-learning.git" main > "%LOG%" 2>&1
+git -c credential.helper= push "https://dingdingdang460:%PAT%@github.com/dingdingdang460/my-shell-learning.git" main > "%LOG%" 2>&1
 set "PUSH_RC=%errorlevel%"
 echo.
 echo ---------- git output (also in %LOG%) ----------
