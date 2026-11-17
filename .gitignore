@@ -40,6 +40,7 @@ config.json
 .env
 *.key
 *.pem
+pat.txt
 
 # --- WorkBuddy 本地会话数据（保留在本机，不删除、不上传）---
 .workbuddy/

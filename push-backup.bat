@@ -2,62 +2,67 @@
 setlocal
 cd /d "%~dp0"
 set "LOG=%~dp0push-backup.log"
+set "PATFILE=%~dp0pat.txt"
 echo ============================================================
-echo  Wallpaper Manager - Push source to GitHub backup
+echo  Wallpaper Manager - Push source to GitHub (PAT method)
 echo  Target: https://github.com/dingdingdang460/my-shell-learning
-echo  Full output is logged to: %LOG%
 echo ============================================================
 echo.
-
-rem ---- environment header (overwrite: latest run only) ----
-echo ===== Run diag %time% ===== > "%LOG%"
-echo [PWD] %CD% >> "%LOG%"
-echo [git version] >> "%LOG%"
-git --version >> "%LOG%" 2>&1
-echo [git path] >> "%LOG%"
-where git >> "%LOG%" 2>&1
-echo [HOME] %HOME% >> "%LOG%"
-echo [USERPROFILE] %USERPROFILE% >> "%LOG%"
-
-echo First run opens a GitHub sign-in window:
-echo   choose "Sign in with your browser" and authorize in the browser.
-echo   Or use a PAT: user dingdingdang460, password = Personal Access Token with repo scope.
-echo Credentials are remembered by Windows; later runs need no sign-in.
+echo Browser sign-in is blocked by a localhost IPv6 issue on this PC.
+echo This script uses a Personal Access Token (PAT) instead - no browser needed.
 echo.
-pause
+echo SETUP (one time, about 1 min):
+echo   1. Open: https://github.com/settings/tokens/new
+echo   2. Note: wallpaper-backup; Expiration: 90 days
+echo   3. Tick scope "repo" (for this PUBLIC repo, "public_repo" also works).
+echo   4. Generate, copy the token.
+echo   5. Paste it as the ONLY content of pat.txt in this folder, then save.
+echo.
+echo The script deletes pat.txt after the run (win or fail).
+echo.
 
-rem Override HOME only, to bypass user-level ghproxy insteadOf rewrite.
-rem System-level credential.helper stays active; GCM stores creds in Windows Credential Manager.
-set "TMPHOME=%TEMP%\wallpaper-gitpush-home"
-if not exist "%TMPHOME%" mkdir "%TMPHOME%"
-set "HOME=%TMPHOME%"
-echo [temp HOME] %HOME% >> "%LOG%"
+if not exist "%PATFILE%" goto :nopatfile
+set /p "PAT=" < "%PATFILE%"
+if not defined PAT goto :nopat
+if "%PAT%"=="" goto :nopat
 
-echo [1/2] Pushing main (sign-in window on first run)...
-git push https://github.com/dingdingdang460/my-shell-learning.git main >> "%LOG%" 2>&1
+echo [1/2] Pushing main via PAT (this may take 10-40s)...
+git push "https://dingdingdang460:%PAT%@github.com/dingdingdang460/my-shell-learning.git" main > "%LOG%" 2>&1
 set "PUSH_RC=%errorlevel%"
 echo.
-echo ---------- output (also saved to log) ----------
+echo ---------- git output (also in %LOG%) ----------
 type "%LOG%"
 echo ------------------------------------------------
+del /q "%PATFILE%" >nul 2>&1
 if not "%PUSH_RC%"=="0" goto :fail
 
 echo [2/2] Verifying remote main...
-git ls-remote https://github.com/dingdingdang460/my-shell-learning.git refs/heads/main >> "%LOG%" 2>&1
+git ls-remote "https://github.com/dingdingdang460/my-shell-learning.git" refs/heads/main
 echo Local HEAD:
 git rev-parse HEAD
 echo.
-echo Push OK. Future runs can just use git push.
-pause
-exit /b 0
+echo SUCCESS. pat.txt has been deleted.
+goto :done
+
+:nopatfile
+echo pat.txt NOT FOUND. Create it in this folder with your PAT as the only line.
+set "PUSH_RC=1"
+goto :done
+
+:nopat
+echo pat.txt is empty. Aborted.
+del /q "%PATFILE%" >nul 2>&1
+set "PUSH_RC=1"
+goto :done
 
 :fail
 echo.
-echo Push failed (exit %PUSH_RC%). Full log: %LOG%
-echo Common causes:
-echo   1) sign-in cancelled, or PAT lacks repo write scope;
-echo   2) no network access to github.com:443;
-echo   3) two git installs use different credential helpers.
+echo Push FAILED (exit %PUSH_RC%). Full log: %LOG%
+echo Common causes: PAT lacks repo/public_repo scope, PAT expired,
+echo   wrong username, or no network to github.com:443.
 echo Send %LOG% to the assistant for diagnosis.
+
+:done
+echo.
 pause
-exit /b 1
+exit /b %PUSH_RC%
