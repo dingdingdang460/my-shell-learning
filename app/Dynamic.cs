@@ -107,9 +107,19 @@ namespace WallpaperManager
         {
             try
             {
-                if (proc != null && !proc.HasExited) proc.Kill();
+                if (proc != null && !proc.HasExited)
+                {
+                    proc.Kill();
+                    // 等进程真正退出、松开 mp4 句柄再返回。否则紧接着删片子会撞 sharing
+                    // violation：条目从 index.json 抹掉，视频文件却留在磁盘上成孤儿。
+                    // 正常退出路径上面已 PostMessage + Sleep(150)，走到这里多半是播放器卡住，
+                    // 1.5 秒上限换来删除成功，值得。
+                    try { proc.WaitForExit(1500); } catch { }
+                }
             }
             catch { }
+            // Process 持有非托管句柄，每次换台都覆盖 proc 却不 Dispose 会慢慢累积。
+            try { if (proc != null) proc.Dispose(); } catch { }
             try { proc = null; } catch { }
         }
 
@@ -194,6 +204,8 @@ namespace WallpaperManager
                     Log.Note("动态壁纸启动失败：" + err + " pid=" + newPid);
                     lastStopTick = Environment.TickCount;   // 主动收的，不算崩溃
                     try { if (proc != null && !proc.HasExited) proc.Kill(); } catch { }
+                    try { if (proc != null) proc.WaitForExit(1500); } catch { }
+                    try { if (proc != null) proc.Dispose(); } catch { }
                     proc = null;
                     return false;
                 }

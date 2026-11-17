@@ -309,7 +309,19 @@ namespace WallpaperManager
                     }
 
                     IMFSourceReader sr = null;
-                    int hr = MFCreateSourceReaderFromURL(c.Url, attrs, out sr);
+                    int hr;
+                    try
+                    {
+                        // attrs 只用于建 reader，建完即可释放；下面每条 continue/return 都
+                        // 曾漏掉它，反复换片会累积 COM 引用。同函数里 nat/cur/mt/sample/buf
+                        // 都有配对释放，唯独 attrs 缺，这里补齐。
+                        hr = MFCreateSourceReaderFromURL(c.Url, attrs, out sr);
+                    }
+                    finally
+                    {
+                        if (attrs != null) Marshal.ReleaseComObject(attrs);
+                        attrs = null;
+                    }
                     if (hr < 0 || sr == null)
                     {
                         if (!Quiet) Log.Note("[MF] 轮 " + (i + 1) + " " + c.Name + " → 建 reader 失败 0x" + hr.ToString("x8"));

@@ -957,6 +957,10 @@ namespace WallpaperManager
             string dir = Path.Combine(root, "images");
             string target = Path.Combine(dir, item.Id + ".jpg");
             string tmp = target + ".part";
+            // Id 来自 index.json（可被手改）。含 .. 的 Id 会让 Path.Combine 逃出 images 目录，
+            // 把下载内容写到库外。和 AddTarget/DeleteUnder 同一套根路径校验口径。
+            string guard = Path.GetFullPath(dir).TrimEnd('\\') + '\\';
+            if (!Path.GetFullPath(target).StartsWith(guard, StringComparison.OrdinalIgnoreCase)) return null;
 
             try
             {
