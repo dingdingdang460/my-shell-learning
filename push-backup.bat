@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 set "LOG=%~dp0push-backup.log"
 set "PATFILE=%~dp0pat.txt"
@@ -11,21 +11,40 @@ echo.
 echo Browser sign-in is blocked by a localhost IPv6 issue on this PC.
 echo This script uses a Personal Access Token (PAT) instead - no browser needed.
 echo.
-echo SETUP (one time, about 1 min):
-echo   1. Open: https://github.com/settings/tokens/new
-echo   2. Note: wallpaper-backup; Expiration: 90 days
-echo   3. Tick scope "repo" (for this PUBLIC repo, "public_repo" also works).
-echo   4. Generate, copy the token.
-echo   5. Paste it as the ONLY content of pat.txt in this folder, then save.
+
+echo STEP 1 - GET A TOKEN (one time, about 1 min):
+echo   Open: https://github.com/settings/tokens/new
+echo   Note: wallpaper-backup; Expiration: 90 days
+echo   Tick scope "repo" (for this PUBLIC repo, "public_repo" also works).
+echo   Generate, then copy the token.
 echo.
-echo The script deletes pat.txt after the run (win or fail).
+echo STEP 2 - PASTE IT:
+echo   Notepad will open with pat.txt. Paste the token as the ONLY content,
+echo   save and close Notepad, then come back here and press any key.
 echo.
 
-if not exist "%PATFILE%" goto :nopatfile
-set /p "PAT=" < "%PATFILE%"
+if not exist "%PATFILE%" (
+    > "%PATFILE%" echo PASTE_YOUR_GITHUB_TOKEN_HERE
+)
+if not exist "%PATFILE%" goto :createfail
+
+start "" notepad "%PATFILE%"
+echo.
+set /p "DUMMY=After saving pat.txt in Notepad, press Enter here to continue... "
+
+rem Read first non-empty line, strip surrounding quotes and spaces.
+set "PAT="
+for /f "usebackq delims=" %%L in ("%PATFILE%") do (
+    if not defined PAT (
+        set "LINE=%%L"
+        set "LINE=!LINE:"=!"
+        set "PAT=!LINE: =!"
+    )
+)
 if not defined PAT goto :nopat
-if "%PAT%"=="" goto :nopat
+if /i "%PAT%"=="PASTE_YOUR_GITHUB_TOKEN_HERE" goto :nopat
 
+echo.
 echo [1/2] Pushing main via PAT (this may take 10-40s)...
 git push "https://dingdingdang460:%PAT%@github.com/dingdingdang460/my-shell-learning.git" main > "%LOG%" 2>&1
 set "PUSH_RC=%errorlevel%"
@@ -44,13 +63,13 @@ echo.
 echo SUCCESS. pat.txt has been deleted.
 goto :done
 
-:nopatfile
-echo pat.txt NOT FOUND. Create it in this folder with your PAT as the only line.
+:createfail
+echo Cannot create pat.txt here. Check write permission for this folder.
 set "PUSH_RC=1"
 goto :done
 
 :nopat
-echo pat.txt is empty. Aborted.
+echo pat.txt is empty or still the placeholder. Aborted. Nothing was pushed.
 del /q "%PATFILE%" >nul 2>&1
 set "PUSH_RC=1"
 goto :done
