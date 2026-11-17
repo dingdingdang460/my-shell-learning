@@ -72,6 +72,8 @@ namespace WallpaperManager
         readonly TextBox batteryPctBox = new TextBox();
         readonly CheckBox autoDelogoBox = new CheckBox();       // 11-16 角标验收
         readonly CheckBox prefer4kBox = new CheckBox();         // 11-16 4K 优先
+        readonly CheckBox timeRotateBox = new CheckBox();       // 11-17 时段轮换
+        readonly TextBox timeSlotsBox = new TextBox();          // 11-17 时段表
         readonly TextBox ffmpegBox = new TextBox();
         readonly TextBlock ffmpegState = new TextBlock();
         readonly TextBox proxyBox = new TextBox();
@@ -173,6 +175,26 @@ namespace WallpaperManager
 
             StyleCheck(autoRotateBox, "启用定时轮换");
             root.Children.Add(autoRotateBox);
+
+            // 11-17 时段轮换：按一天里的时间段挑不同组的壁纸。规则全在下面的时段表里，
+            // 代码不写死；不勾选就完全走原来的固定间隔轮换。
+            StyleCheck(timeRotateBox, "按时段轮换（到点只换该组的壁纸，未分组的图任何时段都参与）");
+            root.Children.Add(timeRotateBox);
+
+            root.Children.Add(Label("时段表：组名|起-止;组名|起-止（24 小时制，跨零点写成 22:00-06:00）"));
+            StyleInput(timeSlotsBox);
+            timeSlotsBox.AcceptsReturn = true;
+            timeSlotsBox.TextWrapping = System.Windows.TextWrapping.Wrap;
+            timeSlotsBox.Height = 58;
+            timeSlotsBox.HorizontalAlignment = HorizontalAlignment.Stretch;
+            root.Children.Add(timeSlotsBox);
+
+            TextBlock slotHint = new TextBlock();
+            slotHint.Text = "壁纸归到哪一组：在主界面右键壁纸卡 →「设为时段组」里选。留空 = 不分组，任何时段都会出现。该组没图或当前不在任何时段时，自动按全库轮换。";
+            slotHint.FontSize = 11;
+            slotHint.Foreground = TextDim;
+            slotHint.TextWrapping = System.Windows.TextWrapping.Wrap;
+            root.Children.Add(slotHint);
 
             // 开机自启 & 欢迎
             StyleCheck(autoStartBox, "开机自动启动（写入 HKCU 的 Run 键，不需要管理员）");
@@ -935,6 +957,9 @@ namespace WallpaperManager
             batteryPctBox.Text = c.BatteryPausePercent.ToString(CultureInfo.InvariantCulture);
             autoDelogoBox.IsChecked = c.AutoDelogo;
             prefer4kBox.IsChecked = c.Prefer4k;
+            timeRotateBox.IsChecked = c.TimeRotateEnabled;
+            timeSlotsBox.Text = string.IsNullOrEmpty(c.TimeSlots)
+                ? "早晨|06:00-09:00;白天|09:00-18:00;夜晚|18:00-06:00" : c.TimeSlots;
             ffmpegBox.Text = c.FfmpegPath == null ? "" : c.FfmpegPath;
             ffmpegState.Text = "";
             RefreshFfmpegState();
@@ -992,6 +1017,11 @@ namespace WallpaperManager
             // 填了但跑不起来也不拦保存（可能只是临时没插移动盘），探测结果在界面上说明。
             c.AutoDelogo = autoDelogoBox.IsChecked == true;
             c.Prefer4k = prefer4kBox.IsChecked == true;
+            c.TimeRotateEnabled = timeRotateBox.IsChecked == true;
+            // 时段表原样存；空了回填默认三组，别让开着开关却一条规则都没有。
+            string slots = timeSlotsBox.Text == null ? "" : timeSlotsBox.Text.Trim();
+            c.TimeSlots = string.IsNullOrEmpty(slots)
+                ? "早晨|06:00-09:00;白天|09:00-18:00;夜晚|18:00-06:00" : slots;
             c.FfmpegPath = ffmpegBox.Text == null ? "" : ffmpegBox.Text.Trim();
             app.SyncWatermarkFfmpeg();
 

@@ -2793,6 +2793,163 @@ namespace WallpaperManager
             return Finish(sb, pass, total);
         }
 
+        /// <summary>
+        /// 11-17 时段轮换自检。核心是 TimeSlots 的纯函数；config / index 的字段往返
+        /// 全部走临时目录隔离，不碰真实壁纸库和真实配置。跑在自检进程里（名字以 test 结尾），
+        /// 不恢复动态壁纸、不接管桌面。
+        /// </summary>
+        public static string TimeSlotTest(App app)
+        {
+            StringBuilder sb = new StringBuilder();
+            int pass = 0, total = 0;
+
+            string spec = "早晨|06:00-09:00;白天|09:00-18:00;夜晚|18:00-06:00";
+
+            // ---- 1) 解析：三段都认，跨零点标记正确 ----
+            List<TimeSlots.Range> ranges = TimeSlots.Parse(spec);
+            Hit(sb, ref pass, ref total, "时段表解析出三组",
+                ranges.Count == 3, "实际 " + ranges.Count + " 组");
+            bool namesOk = ranges.Count == 3
+                && ranges[0].Name == "早晨" && ranges[1].Name == "白天" && ranges[2].Name == "夜晚";
+            Hit(sb, ref pass, ref total, "组名按顺序解析正确", namesOk, "");
+            Hit(sb, ref pass, ref total, "夜晚段识别出跨零点（起大于止）",
+                ranges.Count == 3 && ranges[2].Wrap, "");
+
+            // ---- 2) 非法段跳过，不让一张坏表整段失效 ----
+            List<TimeSlots.Range> mixed = TimeSlots.Parse("坏段无竖线;早晨|06:00-09:00;空段|;白天|25:00-03:00");
+            Hit(sb, ref pass, ref total, "格式错的段被跳过，合法段仍保留",
+                mixed.Count == 1 && mixed[0].Name == "早晨",
+                "保留 " + mixed.Count + " 组");
+            List<TimeSlots.Range> empty = TimeSlots.Parse("");
+            Hit(sb, ref pass, ref total, "空时段表解析成零组", empty.Count == 0, "");
+
+            // ---- 3) HH:MM 解析边界 ----
+            Hit(sb, ref pass, ref total, "分钟解析：边界与非法值",
+                TimeSlots.Minute("00:00") == 0 && TimeSlots.Minute("23:59") == 1439
+                && TimeSlots.Minute("9:05") == 545
+                && TimeSlots.Minute("24:00") < 0 && TimeSlots.Minute("12:60") < 0
+                && TimeSlots.Minute("abc") < 0 && TimeSlots.Minute(null) < 0, "");
+
+            // ---- 4) Contains：左闭右开，边界不重叠；跨零点两侧都命中 ----
+            bool boundaryOk = TimeSlots.Contains(ranges[0], 360)   // 06:00 归早晨
+                           && !TimeSlots.Contains(ranges[0], 540)  // 09:00 不归早晨（归白天）
+                           && TimeSlots.Contains(ranges[1], 540)   // 09:00 归白天
+                           && !TimeSlots.Contains(ranges[1], 1080);// 18:00 归夜晚
+            Hit(sb, ref pass, ref total, "普通时段左闭右开，边界不重叠", boundaryOk, "");
+            bool wrapOk = TimeSlots.Contains(ranges[2], 1080)   // 18:00 归夜晚
+                       && TimeSlots.Contains(ranges[2], 1439)  // 23:59 归夜晚
+                       && TimeSlots.Contains(ranges[2], 0)     // 00:00 归夜晚
+                       && TimeSlots.Contains(ranges[2], 359)   // 05:59 归夜晚
+                       && !TimeSlots.Contains(ranges[2], 360); // 06:00 已归早晨
+            Hit(sb, ref pass, ref total, "跨零点时段覆盖 18:00 到次日 06:00 两侧", wrapOk, "");
+
+            // ---- 5) CurrentGroup：各时刻命中正确的组 ----
+            bool curOk = TimeSlots.CurrentGroup(ranges, new DateTime(2026, 11, 17, 7, 30, 0)) == "早晨"
+                      && TimeSlots.CurrentGroup(ranges, new DateTime(2026, 11, 17, 12, 0, 0)) == "白天"
+                      && TimeSlots.CurrentGroup(ranges, new DateTime(2026, 11, 17, 23, 0, 0)) == "夜晚"
+                      && TimeSlots.CurrentGroup(ranges, new DateTime(2026, 11, 17, 2, 0, 0)) == "夜晚";
+            Hit(sb, ref pass, ref total, "当前时刻命中正确时段组（含次日凌晨）", curOk, "");
+            Hit(sb, ref pass, ref total, "有缝时段表：缝里返回空组",
+                TimeSlots.CurrentGroup(TimeSlots.Parse("白天|09:00-18:00"),
+                                       new DateTime(2026, 11, 17, 22, 0, 0)).Length == 0, "");
+
+            // ---- 6) Candidates：命中组 + 不分组，顺序不变，不改动原列表 ----
+            List<WallpaperItem> items = new List<WallpaperItem>();
+            string[] ids = { "a", "b", "c", "d", "e" };
+            string[] slots = { "白天", "夜晚", "", "白天", "" };
+            for (int i = 0; i < ids.Length; i++)
+            {
+                WallpaperItem it = new WallpaperItem();
+                it.Id = ids[i];
+                it.Title = ids[i];
+                it.Slot = slots[i];
+                items.Add(it);
+            }
+            int origCount = items.Count;
+            // 白天组 = a、d；不分组 = c、e → 候选池 4 张，顺序 a、d、c、e（保持原列表先后）。
+            List<WallpaperItem> dayPool = TimeSlots.Candidates(items, "白天");
+            bool poolIds = dayPool.Count == 4
+                        && dayPool[0].Id == "a" && dayPool[1].Id == "d"
+                        && dayPool[2].Id == "c" && dayPool[3].Id == "e";
+            Hit(sb, ref pass, ref total, "候选池 = 命中组 + 不分组，且保持原顺序",
+                poolIds, "池内 " + dayPool.Count + " 张：" + (dayPool.Count > 0 ? dayPool[0].Id : "空"));
+            Hit(sb, ref pass, ref total, "筛选不改原列表", items.Count == origCount, "");
+
+            // ---- 7) 回退：该组没图 / 不在任何时段 / 空表 → 全库 ----
+            List<WallpaperItem> nobody = TimeSlots.Candidates(items, "黄昏");
+            Hit(sb, ref pass, ref total, "该组一张图都没有时退回全库", nobody.Count == items.Count, "");
+            List<WallpaperItem> noSlot = TimeSlots.Candidates(items, "");
+            Hit(sb, ref pass, ref total, "当前不在任何时段时退回全库", noSlot.Count == items.Count, "");
+            // 全库都分了组、但没有一张属于当前组：仍退回全库，保证轮换不卡死。
+            List<WallpaperItem> allGrouped = new List<WallpaperItem>();
+            WallpaperItem g = new WallpaperItem(); g.Id = "x"; g.Slot = "白天"; allGrouped.Add(g);
+            Hit(sb, ref pass, ref total, "全分组且当前组无图：退回全库不卡死",
+                TimeSlots.Candidates(allGrouped, "夜晚").Count == allGrouped.Count, "");
+
+            // ---- 8) config 字段往返：开/关 + 时段表，走临时目录隔离 ----
+            string tmp = Path.Combine(Path.GetTempPath(), "wb-timeslot-" + Environment.TickCount);
+            string savedOverride = ConfigStore.DirOverride;
+            try
+            {
+                Directory.CreateDirectory(tmp);
+                ConfigStore.DirOverride = tmp;
+                AppConfig c = new AppConfig();
+                c.TimeRotateEnabled = true;
+                c.TimeSlots = "深夜|23:00-05:00";
+                ConfigStore.Save(c);
+                AppConfig back = ConfigStore.LoadFrom(ConfigStore.FilePath);
+                Hit(sb, ref pass, ref total, "config 往返：开关与时段表都能读回",
+                    back.TimeRotateEnabled && back.TimeSlots == "深夜|23:00-05:00", "");
+
+                // 老配置缺键：开关默认关、时段表回填默认三组
+                File.WriteAllText(ConfigStore.FilePath, "{}", new UTF8Encoding(false));
+                AppConfig legacy = ConfigStore.LoadFrom(ConfigStore.FilePath);
+                Hit(sb, ref pass, ref total, "老配置缺键：默认关 + 默认时段表回填",
+                    !legacy.TimeRotateEnabled
+                    && TimeSlots.Parse(legacy.TimeSlots).Count == 3, "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "config 往返未抛异常", false, ex.GetType().Name);
+            }
+            finally
+            {
+                ConfigStore.DirOverride = savedOverride;
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            // ---- 9) index.json 的 slot 字段往返：SetSlot 写回 + Load 读回 ----
+            try
+            {
+                Directory.CreateDirectory(tmp);
+                string imgDir = Path.Combine(tmp, "images");
+                Directory.CreateDirectory(imgDir);
+                string img = Path.Combine(imgDir, "slot-1.jpg");
+                File.WriteAllBytes(img, new byte[] { 1, 2, 3 });
+                string err;
+                bool setOk = LibraryStore.SetSlot("slot-1", tmp, "夜晚", out err);
+                List<WallpaperItem> loaded = LibraryStore.Load(tmp);
+                WallpaperItem got = ItemById(loaded, "slot-1");
+                bool roundTrip = setOk && got != null && got.Slot == "夜晚";
+                Hit(sb, ref pass, ref total, "index.json 往返：SetSlot 写的组名 Load 能读回",
+                    roundTrip, got == null ? err : got.Slot);
+
+                bool clearOk = LibraryStore.SetSlot("slot-1", tmp, "", out err)
+                            && ItemById(LibraryStore.Load(tmp), "slot-1").Slot == "";
+                Hit(sb, ref pass, ref total, "取消分组：slot 清空后读回为空", clearOk, "");
+            }
+            catch (Exception ex)
+            {
+                Hit(sb, ref pass, ref total, "index.json 往返未抛异常", false, ex.GetType().Name);
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            return Finish(sb, pass, total);
+        }
+
         static WallpaperItem ItemById(List<WallpaperItem> list, string id)
         {
             for (int i = 0; i < list.Count; i++)

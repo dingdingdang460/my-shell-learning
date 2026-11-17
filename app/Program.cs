@@ -773,6 +773,28 @@ namespace WallpaperManager
                     auto.Start();
                     break;
                 }
+                if (string.Equals(s, "--timeslottest", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 11-17：时段轮换。纯函数自检（解析 / 判定 / 筛选 / 跨零点 / 回退），
+                    // 不碰真实壁纸库、不碰配置、不接管桌面。
+                    DispatcherTimer auto = new DispatcherTimer();
+                    auto.Interval = TimeSpan.FromSeconds(2);
+                    auto.Tick += delegate
+                    {
+                        auto.Stop();
+                        string detail;
+                        try { detail = SelfTestExtra.TimeSlotTest(this); }
+                        catch (Exception ex)
+                        {
+                            detail = "× 异常 " + ex.GetType().Name + "：" + ex.Message + "  FAIL";
+                        }
+                        Log.Note("自检 --timeslottest：\r\n" + detail);
+                        Log.Note("自检 --timeslottest："
+                                 + (detail.IndexOf("FAIL") < 0 && detail.IndexOf("×") < 0 ? "PASS" : "FAIL"));
+                    };
+                    auto.Start();
+                    break;
+                }
                 if (string.Equals(s, "--orphantest", StringComparison.OrdinalIgnoreCase))
                 {
                     // 11-14：主人「video 文件夹下有视频啊，怎么还要生成」——
@@ -4326,6 +4348,30 @@ namespace WallpaperManager
 
         // ---------------- 日常便利：收藏 / 历史回滚 / 导入 / 暂停 ----------------
 
+        /// <summary>
+        /// 11-17 时段轮换：把一张壁纸设到某个时段组（slot 为空 = 取消分组）。
+        /// 写 index.json 成功后同步内存里的 Slot，并刷新列表让勾选状态可见。
+        /// </summary>
+        public void SetSlotFor(WallpaperItem it, string slot)
+        {
+            if (it == null) return;
+            string err;
+            if (!LibraryStore.SetSlot(it.Id, Config.LibRoot, slot, out err))
+            {
+                if (win != null) win.SetStatus("分组失败：" + err);
+                return;
+            }
+            it.Slot = slot == null ? "" : slot;
+            if (win != null)
+            {
+                win.RefreshList();
+                win.SetStatus(string.IsNullOrEmpty(it.Slot)
+                    ? "已取消分组（" + it.Title + " 任何时段都出现）"
+                    : "「" + it.Title + "」已归入时段组：" + it.Slot);
+            }
+            Log.Note("时段分组：" + it.Id + " -> " + (string.IsNullOrEmpty(it.Slot) ? "(不分组)" : it.Slot));
+        }
+
         /// <summary>最近应用过的壁纸（最多 24 条），F5 一键回滚到上一张</summary>
         readonly List<string> history = new List<string>();
 
@@ -4472,8 +4518,27 @@ namespace WallpaperManager
                 win.SetStatus("图库为空，先在 D:\\Wallpaper 放点壁纸再试");
                 return;
             }
-            cursor = (cursor + 1) % Items.Count;
-            ApplyItem(Items[cursor]);
+
+            // 11-17 时段轮换：开了开关时，只在「当前时段命中的组 + 不分组的图」里
+            // 换下一张；该组没图或当前不在任何时段时，TimeSlots.Candidates 自动退回全集，
+            // 行为与以前的固定间隔轮换完全一致。没开开关就走原来的全库顺序。
+            List<WallpaperItem> pool = Items;
+            if (Config != null && Config.TimeRotateEnabled)
+            {
+                List<TimeSlots.Range> ranges = TimeSlots.Parse(Config.TimeSlots);
+                string group = TimeSlots.CurrentGroup(ranges, DateTime.Now);
+                List<WallpaperItem> filtered = TimeSlots.Candidates(Items, group);
+                if (filtered.Count > 0) pool = filtered;
+            }
+
+            // 当前壁纸在候选池里的位置：找不到（比如刚切到新时段、当前图不在新组）
+            // 就从池里第一张开始，避免按 -1 算出错误下标。
+            int pi = -1;
+            string curId = (cursor >= 0 && cursor < Items.Count) ? Items[cursor].Id : "";
+            for (int i = 0; i < pool.Count; i++)
+                if (pool[i].Id == curId) { pi = i; break; }
+            int next = (pi + 1) % pool.Count;
+            ApplyItem(pool[next]);
         }
 
         // ---------------- 设置壁纸 ----------------

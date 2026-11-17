@@ -3162,6 +3162,37 @@ namespace WallpaperManager
                 cm.Items.Add(m4k);
             }
 
+            // 11-17 时段轮换：把这张图归到某个时段组。组名直接从当前时段表解析，
+            // 表里没配组就不显示这个菜单 —— 不出现「点了没反应」的死入口。
+            List<TimeSlots.Range> slotRanges = TimeSlots.Parse(app.Config.TimeSlots);
+            MenuItem mSlot = null;
+            if (slotRanges.Count > 0)
+            {
+                mSlot = new MenuItem();
+                mSlot.Header = "设为时段组";
+
+                MenuItem mSlotNone = new MenuItem();
+                mSlotNone.Header = "不分组（任何时段都出现）";
+                mSlotNone.IsCheckable = true;
+                mSlotNone.IsChecked = string.IsNullOrEmpty(it.Slot);
+                mSlotNone.Click += delegate { app.SetSlotFor(it, ""); };
+                mSlot.Items.Add(mSlotNone);
+                mSlot.Items.Add(new Separator());
+
+                for (int si = 0; si < slotRanges.Count; si++)
+                {
+                    string gname = slotRanges[si].Name;
+                    MenuItem mSlotG = new MenuItem();
+                    mSlotG.Header = gname;
+                    mSlotG.IsCheckable = true;
+                    mSlotG.IsChecked = it.Slot == gname;
+                    // 闭包必须拷一份：C# 5 里 delegate 捕获循环变量会全指到最后一个。
+                    string captured = gname;
+                    mSlotG.Click += delegate { app.SetSlotFor(it, captured); };
+                    mSlot.Items.Add(mSlotG);
+                }
+            }
+
             MenuItem m3 = new MenuItem();
             m3.Header = "打开所在文件夹";
             m3.Click += delegate { OpenFolder(it); };
@@ -3170,6 +3201,7 @@ namespace WallpaperManager
             cm.Items.Add(m1);
             if (mDyn != null) cm.Items.Add(mDyn);
             cm.Items.Add(m2);
+            if (mSlot != null) cm.Items.Add(mSlot);
             cm.Items.Add(m3);
 
             Separator sp = new Separator();

@@ -21,6 +21,9 @@ namespace WallpaperManager
         public bool Motion;             // 静态图也当动态壁纸播，由用户手动开
         public bool Fav;                // 收藏：只在「只看收藏」视图里出现，排序也优先
         public int Effect;              // 动效方式：2 = 云端飘动视频（videos\<id>.mp4）；0 = 静态（1 是老编号，已废）
+        // 11-17 时段轮换：这张图归属的时段组名（对应 AppConfig.TimeSlots 里的组名）。
+        // 空串 = 不分组，任何时段都参与轮换（老库、没打标签的图都走这条）。
+        public string Slot = "";
     }
 
     /// <summary>用户配置，存 %APPDATA%\wallpaper\config.json</summary>
@@ -89,5 +92,14 @@ namespace WallpaperManager
         // 代价是体积和解码压力约 4 倍，**只有 4K 屏才看得出差别**，
         // 所以默认关；另有「升级为 4K」的右键入口可以逐张手动升。
         public bool Prefer4k;
+
+        // ---- 时段轮换（11-17）----
+        // 固定间隔轮换之外，另开一种「按一天里的时间段挑不同组壁纸」的模式。
+        // 默认关：主人不设置就完全保持原来的固定间隔行为。
+        public bool TimeRotateEnabled;
+        // 时段表，可编辑。格式：组名|起-止;组名|起-止;...，时间为 24 小时 HH:MM，
+        // 跨零点用「22:00-06:00」这种起>止表示。默认给三组可直接用，也能在设置里改。
+        // 规则不写死在代码里，主人爱怎么分就怎么分。
+        public string TimeSlots = "早晨|06:00-09:00;白天|09:00-18:00;夜晚|18:00-06:00";
     }
 }

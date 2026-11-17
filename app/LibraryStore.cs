@@ -76,6 +76,8 @@ namespace WallpaperManager
                             it.Resolution = Json.Str(d, "resolution");
                             it.Motion = Json.Bool(d, "motion", false);
                             it.Fav = Json.Bool(d, "fav", false);
+                            // 11-17 时段轮换：老库没有 slot 键 → 空串 = 不分组，行为不变。
+                            it.Slot = Json.Str(d, "slot");
                             // 动效方式现在只有一档：2 = 云端飘动视频。
                             // 0（场景动效）和 1（缓慢缩放）两种本机算法都已经删掉，
                             // 老库里残留的这类条目读进来直接退回静态，免得界面说「动态」桌面却不动。
@@ -775,6 +777,72 @@ namespace WallpaperManager
         }
 
         /// <summary>
+        /// 11-17 时段轮换：给一条壁纸设归属时段组（空串 = 取消分组）。
+        /// 和 SetFav / SetMotion 一样只改 index.json 里一个字段，散图第一次设会补一条最小记录。
+        /// 组名不校验是否出现在时段表里 —— 主人可以先打标签再改时段表，别把配置互相绑死。
+        /// </summary>
+        public static bool SetSlot(string id, string root, string slot, out string err)
+        {
+            err = "";
+            if (string.IsNullOrEmpty(id)) { err = "条目 id 为空"; return false; }
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) { err = "壁纸库目录不存在"; return false; }
+            if (slot == null) slot = "";
+
+            string indexFile = Path.Combine(root, "index.json");
+            List<object> all = new List<object>();
+            bool found = false;
+
+            try
+            {
+                if (File.Exists(indexFile))
+                {
+                    object[] arr = Json.AsArr(Json.Parse(File.ReadAllText(indexFile, Encoding.UTF8)));
+                    if (arr != null)
+                        foreach (object o in arr)
+                        {
+                            Dictionary<string, object> d = Json.AsDict(o);
+                            if (d != null && Json.Str(d, "id") == id)
+                            {
+                                if (slot.Length == 0) d.Remove("slot");
+                                else d["slot"] = slot;
+                                found = true;
+                            }
+                            all.Add(o);
+                        }
+                }
+            }
+            catch (Exception ex) { err = "读取索引失败：" + ex.Message; return false; }
+
+            if (!found)
+            {
+                string file = "";
+                string[] exts = new string[] { ".jpg", ".jpeg", ".png", ".bmp" };
+                for (int i = 0; i < exts.Length; i++)
+                {
+                    string p = Path.Combine(root, "images", id + exts[i]);
+                    if (File.Exists(p)) { file = "images/" + id + exts[i]; break; }
+                }
+                if (file.Length == 0) { err = "库里找不到这张图：" + id; return false; }
+
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["id"] = id;
+                d["title"] = id;
+                d["tag"] = "static";
+                d["file"] = file;
+                if (slot.Length > 0) d["slot"] = slot;
+                all.Add(d);
+            }
+
+            try
+            {
+                if (File.Exists(indexFile)) File.Copy(indexFile, indexFile + ".bak", true);
+                File.WriteAllText(indexFile, Json.Serialize(all), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { err = "写索引失败：" + ex.Message; return false; }
+            return true;
+        }
+
+        /// <summary>
         /// 把一个本地文件收进库（拖拽 / 批量导入都走这里）。
         ///
         /// 图片只要复制到 images\ 就会被 Load 里的目录扫描自动收录，不用改索引；
@@ -1033,6 +1101,14 @@ namespace WallpaperManager
                 // 「有角标必须修干净才交付」，默认开才对；不想让程序动片子可以在设置里关）。
                 c.FfmpegPath = Json.Str(d, "ffmpegPath");
                 c.AutoDelogo = Json.Bool(d, "autoDelogo", true);
+
+                // 11-17 时段轮换：老配置缺键 → 开关默认关（行为不变）；
+                // 时段表缺键或空串 → 回填默认三组，别让开着开关却没有候选组。
+                c.TimeRotateEnabled = Json.Bool(d, "timeRotateEnabled", false);
+                string slots = Json.Str(d, "timeSlots");
+                c.TimeSlots = string.IsNullOrEmpty(slots) ? "早晨|06:00-09:00;白天|09:00-18:00;夜晚|18:00-06:00" : slots;
+                // Prefer4k 以前只在内存里、没写进 config —— 顺带补上读写，免得设置里改了重启又丢。
+                c.Prefer4k = Json.Bool(d, "prefer4k", false);
             }
             catch { }
             return c;
@@ -1076,7 +1152,10 @@ namespace WallpaperManager
                 sb.Append("  \"pauseOnBattery\": ").Append(c.PauseOnBattery ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"batteryPausePercent\": ").Append(c.BatteryPausePercent).Append(",\r\n");
                 sb.Append("  \"ffmpegPath\": ").Append(Json.Quote(c.FfmpegPath)).Append(",\r\n");
-                sb.Append("  \"autoDelogo\": ").Append(c.AutoDelogo ? "true" : "false").Append("\r\n");
+                sb.Append("  \"autoDelogo\": ").Append(c.AutoDelogo ? "true" : "false").Append(",\r\n");
+                sb.Append("  \"prefer4k\": ").Append(c.Prefer4k ? "true" : "false").Append(",\r\n");
+                sb.Append("  \"timeRotateEnabled\": ").Append(c.TimeRotateEnabled ? "true" : "false").Append(",\r\n");
+                sb.Append("  \"timeSlots\": ").Append(Json.Quote(c.TimeSlots)).Append("\r\n");
                 sb.Append("}\r\n");
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
                 return true;
